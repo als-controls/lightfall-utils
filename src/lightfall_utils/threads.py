@@ -26,7 +26,7 @@ __all__ = [
     "ThreadManager",
     "ManagedThreadPool",
     "get_thread_manager",
-    "thread_manager",
+    "thread_manager",  # noqa: F822 — provided lazily via module __getattr__ (PEP 562)
     "QThreadFuture",
     "QThreadFutureIterator",
     "method",
