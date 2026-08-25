@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+dist/
+build/
+.pytest_cache/
+.coverage
+src/lightfall_utils/_version.py
+.ruff_cache/
