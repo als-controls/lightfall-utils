@@ -245,13 +245,13 @@ class ThemeManager(QObject):
         self._stylesheet_contributors: list[Callable[[ThemeColors, bool, int], str]] = []
         # Islands layout (rounded floating panel cards + islands aesthetic) is
         # a user preference applied on top of any theme, not tied to the
-        # theme's colors. Off by default; AppearanceSettingsPlugin syncs it
-        # from prefs.
+        # theme's colors. Off by default; host applications sync it from
+        # their preferences.
         self._islands_mode: bool = False
         # Base UI font point size. Carried in the generated stylesheet (not
         # just pushed via QApplication.setFont) so a runtime change re-polishes
-        # every widget — see set_font_size(). Synced from prefs by
-        # AppearanceSettingsPlugin at preload.
+        # every widget — see set_font_size(). Host applications sync this from
+        # their preferences at preload.
         self._base_font_size: int = 10
 
         # Detect system theme

@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 PACKAGE = Path(__file__).resolve().parent.parent / "src" / "lightfall_utils"
-FORBIDDEN = re.compile(r"^\s*(?:from|import)\s+lightfall\.", re.MULTILINE)
+FORBIDDEN = re.compile(r"^\s*(?:from|import)\s+lightfall\b", re.MULTILINE)
 
 
 def test_no_lightfall_imports():

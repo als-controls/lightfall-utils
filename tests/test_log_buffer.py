@@ -1,4 +1,4 @@
-"""Tests for the in-process log buffer used by the embedded agent."""
+"""Tests for the in-process log buffer."""
 
 from __future__ import annotations
 
@@ -63,7 +63,6 @@ def test_newest_first_ordering(buf: LogBuffer) -> None:
     logger.info("second")
     logger.info("third")
 
-    records = buf.get_records(contains="first|second|third")
     # contains is substring (no regex), so do per-message filter:
     records = [r for r in buf.get_records() if r.message in {"first", "second", "third"}]
     assert [r.message for r in records[:3]] == ["third", "second", "first"]

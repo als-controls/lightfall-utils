@@ -19,10 +19,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ca = [
-    "caproto>=1.1",
-    "netifaces>=0.11; sys_platform != 'darwin'",
-]
+ca = ["caproto>=1.1"]
+# netifaces (abandoned upstream, sdist-only) enables caproto multi-homed interface enumeration; caproto degrades gracefully without it
+multihomed = ["netifaces>=0.11; sys_platform != 'darwin'"]
 dev = [
     "caproto>=1.1",
     "pytest>=8.0",
