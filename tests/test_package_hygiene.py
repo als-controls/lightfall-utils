@@ -9,9 +9,7 @@ FORBIDDEN = re.compile(r"^\s*(?:from|import)\s+lightfall\.", re.MULTILINE)
 
 def test_no_lightfall_imports():
     offenders = [
-        str(p)
-        for p in PACKAGE.rglob("*.py")
-        if FORBIDDEN.search(p.read_text(encoding="utf-8"))
+        str(p) for p in PACKAGE.rglob("*.py") if FORBIDDEN.search(p.read_text(encoding="utf-8"))
     ]
     assert offenders == [], f"lightfall_utils must not import from lightfall: {offenders}"
 

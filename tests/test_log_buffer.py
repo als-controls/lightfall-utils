@@ -89,26 +89,30 @@ def test_name_prefix_filter(buf: LogBuffer) -> None:
 
     from lightfall_utils.log_buffer import LogRecord
 
-    fake._records.append(LogRecord(
-        timestamp=datetime.now(UTC),
-        level="INFO",
-        level_no=20,
-        name="lightfall.devices.motor",
-        function="move",
-        line=10,
-        thread="MainThread",
-        message="moving motor",
-    ))
-    fake._records.append(LogRecord(
-        timestamp=datetime.now(UTC),
-        level="INFO",
-        level_no=20,
-        name="lightfall.acquire.run",
-        function="start",
-        line=20,
-        thread="MainThread",
-        message="starting run",
-    ))
+    fake._records.append(
+        LogRecord(
+            timestamp=datetime.now(UTC),
+            level="INFO",
+            level_no=20,
+            name="lightfall.devices.motor",
+            function="move",
+            line=10,
+            thread="MainThread",
+            message="moving motor",
+        )
+    )
+    fake._records.append(
+        LogRecord(
+            timestamp=datetime.now(UTC),
+            level="INFO",
+            level_no=20,
+            name="lightfall.acquire.run",
+            function="start",
+            line=20,
+            thread="MainThread",
+            message="starting run",
+        )
+    )
 
     records = fake.get_records(name_prefix="lightfall.devices")
     names = [r.name for r in records]

@@ -68,8 +68,12 @@ class PV(QObject):
         self._subscription = None
 
         # Connect internal signals for thread-safe updates
-        self._value_received.connect(self._handle_value_received, Qt.ConnectionType.QueuedConnection)
-        self._connection_ready.connect(self._handle_connection_ready, Qt.ConnectionType.QueuedConnection)
+        self._value_received.connect(
+            self._handle_value_received, Qt.ConnectionType.QueuedConnection
+        )
+        self._connection_ready.connect(
+            self._handle_connection_ready, Qt.ConnectionType.QueuedConnection
+        )
 
         if auto_connect:
             self.connect_pv()

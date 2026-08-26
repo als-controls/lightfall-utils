@@ -158,10 +158,10 @@ class IslandsThemePlugin(ThemeProvider):
         return True
 
     # --- Islands color constants (used in both definition and CSS) ---
-    _BG = "#18181B"       # background (deepest)
-    _ISLAND = "#1E1E22"   # surface / island panels
-    _SEA = "#27272A"      # sea (gaps, title bars, menubar)
-    _INPUT = "#1F1F23"    # input fields
+    _BG = "#18181B"  # background (deepest)
+    _ISLAND = "#1E1E22"  # surface / island panels
+    _SEA = "#27272A"  # sea (gaps, title bars, menubar)
+    _INPUT = "#1F1F23"  # input fields
     _BORDER = "#3F3F46"
     _BORDER_HI = "#52525B"
     _ACCENT = "#6B57FF"
@@ -551,8 +551,8 @@ class _IslandsPalette:
         self._TEXT = c.text
         self._BORDER = c.border
         self._ACCENT = c.primary
-        self._INPUT = _adjust(c.background, 7)        # slightly elevated field
-        self._BORDER_HI = _adjust(c.border, 18)       # focus/hover border
+        self._INPUT = _adjust(c.background, 7)  # slightly elevated field
+        self._BORDER_HI = _adjust(c.border, 18)  # focus/hover border
         self._ACCENT_HOVER = _adjust(c.primary, -16)
         self._ACCENT_PRESS = _adjust(c.primary, -32)
 
@@ -586,18 +586,18 @@ class CatppuccinMochaThemePlugin(ThemeProvider):
 
     def get_theme_definition(self) -> ThemeDefinition:
         return ThemeDefinition(
-            primary="#cba6f7",       # mauve
-            secondary="#f5c2e7",     # pink
-            success="#a6e3a1",       # green
-            warning="#fab387",       # peach
-            error="#f38ba8",         # red
-            info="#74c7ec",          # sapphire
-            background="#1e1e2e",    # base
-            surface="#313244",       # surface0
-            sea="#3a3b50",           # surface1 — lighter than surface (gaps)
-            text="#cdd6f4",          # text
+            primary="#cba6f7",  # mauve
+            secondary="#f5c2e7",  # pink
+            success="#a6e3a1",  # green
+            warning="#fab387",  # peach
+            error="#f38ba8",  # red
+            info="#74c7ec",  # sapphire
+            background="#1e1e2e",  # base
+            surface="#313244",  # surface0
+            sea="#3a3b50",  # surface1 — lighter than surface (gaps)
+            text="#cdd6f4",  # text
             text_secondary="#a6adc8",  # subtext0
-            border="#45475a",        # surface1
+            border="#45475a",  # surface1
             connected="#a6e3a1",
             disconnected="#5c2530",
         )
@@ -624,18 +624,18 @@ class EldritchThemePlugin(ThemeProvider):
 
     def get_theme_definition(self) -> ThemeDefinition:
         return ThemeDefinition(
-            primary="#a48cf2",       # magenta/purple
-            secondary="#04d1f9",     # cyan
-            success="#37f499",       # green
-            warning="#f7c67f",       # orange
-            error="#f16c75",         # red
-            info="#39DDFD",          # bright_cyan
-            background="#212337",    # bg
-            surface="#292e42",       # bg_highlight
-            sea="#31374f",           # lighter than surface (gaps/canvas)
-            text="#ebfafa",          # fg
+            primary="#a48cf2",  # magenta/purple
+            secondary="#04d1f9",  # cyan
+            success="#37f499",  # green
+            warning="#f7c67f",  # orange
+            error="#f16c75",  # red
+            info="#39DDFD",  # bright_cyan
+            background="#212337",  # bg
+            surface="#292e42",  # bg_highlight
+            sea="#31374f",  # lighter than surface (gaps/canvas)
+            text="#ebfafa",  # fg
             text_secondary="#ABB4DA",  # fg_dark
-            border="#414868",        # terminal_black
+            border="#414868",  # terminal_black
             connected="#37f499",
             disconnected="#722f55",  # magenta3
         )
@@ -663,18 +663,18 @@ class EvangelionThemePlugin(ThemeProvider):
 
     def get_theme_definition(self) -> ThemeDefinition:
         return ThemeDefinition(
-            primary="#875FAF",       # unit01
-            secondary="#87FF5F",     # kaworu
-            success="#8EDF5F",       # terminaldogma
-            warning="#D99145",       # lcl
-            error="#DB6088",         # misato
-            info="#AB92FC",          # dummyplug
-            background="#201430",    # midnight
-            surface="#201430",       # midnight (panel cards)
-            sea="#39274C",           # casper — lighter than surface (gaps)
-            text="#E1D6F8",          # rei
+            primary="#875FAF",  # unit01
+            secondary="#87FF5F",  # kaworu
+            success="#8EDF5F",  # terminaldogma
+            warning="#D99145",  # lcl
+            error="#DB6088",  # misato
+            info="#AB92FC",  # dummyplug
+            background="#201430",  # midnight
+            surface="#201430",  # midnight (panel cards)
+            sea="#39274C",  # casper — lighter than surface (gaps)
+            text="#E1D6F8",  # rei
             text_secondary="#A1A0AD",  # shinji
-            border="#483160",        # longingus
+            border="#483160",  # longingus
             connected="#8EDF5F",
             disconnected="#5B2B41",  # nerv
         )
@@ -703,27 +703,27 @@ class AyakaThemePlugin(ThemeProvider):
         return True
 
     # --- Ayaka color constants ---
-    _BG = "#1a1b2e"        # twilight indigo (deepest)
-    _ISLAND = "#1f2038"    # deeper twilight (surface / panel cards)
-    _SEA = "#252640"       # dusk cloud (sea / gaps) — lighter than surface
-    _INPUT = "#1e1f35"     # input fields — slightly warmer than bg
-    _BORDER = "#3a3a58"    # indigo border
-    _BORDER_HI = "#4a4a70" # highlighted border
-    _ACCENT = "#f0a0b8"    # sakura pink
+    _BG = "#1a1b2e"  # twilight indigo (deepest)
+    _ISLAND = "#1f2038"  # deeper twilight (surface / panel cards)
+    _SEA = "#252640"  # dusk cloud (sea / gaps) — lighter than surface
+    _INPUT = "#1e1f35"  # input fields — slightly warmer than bg
+    _BORDER = "#3a3a58"  # indigo border
+    _BORDER_HI = "#4a4a70"  # highlighted border
+    _ACCENT = "#f0a0b8"  # sakura pink
     _ACCENT_HOVER = "#e890a8"  # deeper sakura
     _ACCENT_PRESS = "#d88098"  # pressed sakura
-    _TEXT = "#e8e0f0"      # lavender white
-    _TEXT2 = "#a0a0b8"     # muted lavender
+    _TEXT = "#e8e0f0"  # lavender white
+    _TEXT2 = "#a0a0b8"  # muted lavender
 
     def get_theme_definition(self) -> ThemeDefinition:
         c = self
         return ThemeDefinition(
             primary=c._ACCENT,
-            secondary="#b4a0d8",     # wisteria
-            success="#90c8a0",       # young leaves
-            warning="#e0b070",       # lantern amber
-            error="#e07080",         # camellia red
-            info="#80b8e0",          # morning sky
+            secondary="#b4a0d8",  # wisteria
+            success="#90c8a0",  # young leaves
+            warning="#e0b070",  # lantern amber
+            error="#e07080",  # camellia red
+            info="#80b8e0",  # morning sky
             background=c._BG,
             surface=c._ISLAND,
             sea=c._SEA,
@@ -731,7 +731,7 @@ class AyakaThemePlugin(ThemeProvider):
             text_secondary=c._TEXT2,
             border=c._BORDER,
             connected="#90c8a0",
-            disconnected="#5c2535",   # deep plum
+            disconnected="#5c2535",  # deep plum
             # No css_overrides — islands aesthetic comes from the Islands-mode
             # toggle (see IslandsThemePlugin).
         )

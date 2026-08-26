@@ -5,12 +5,12 @@ import time
 import pytest
 from loguru import logger
 
+from lightfall_utils import logging as lfu_logging
 from lightfall_utils.logging import (
     get_cumulative_stats,
     log_time,
     reset_cumulative_stats,
 )
-from lightfall_utils import logging as lfu_logging
 
 
 def test_log_time_basic() -> None:

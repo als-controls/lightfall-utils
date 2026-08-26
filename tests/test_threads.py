@@ -33,6 +33,7 @@ class TestThreadManager:
 
     def test_register_unregister(self, qapp) -> None:
         """Test thread registration and unregistration."""
+
         def dummy():
             time.sleep(0.1)
 
@@ -69,6 +70,7 @@ class TestQThreadFuture:
 
     def test_basic_execution(self, qapp) -> None:
         """Test basic thread execution."""
+
         def compute(x):
             return x * 2
 
@@ -99,6 +101,7 @@ class TestQThreadFuture:
 
     def test_exception_handling(self, qapp) -> None:
         """Test exception is captured."""
+
         def failing_task():
             raise ValueError("Test error")
 
@@ -116,8 +119,10 @@ class TestQThreadFuture:
         a non-cooperative task just runs to completion (or termination),
         racing cancel()'s timeout and making the test flaky.
         """
+
         def slow_task():
             from PySide6.QtCore import QThread
+
             for _ in range(100):
                 if QThread.currentThread().isInterruptionRequested():
                     return "interrupted"
@@ -203,6 +208,7 @@ class TestQThreadFuture:
 
     def test_context_manager(self, qapp) -> None:
         """Test context manager usage."""
+
         def quick_task():
             return "done"
 
@@ -213,6 +219,7 @@ class TestQThreadFuture:
 
     def test_auto_registration(self, qapp) -> None:
         """Test auto-registration with ThreadManager."""
+
         def task():
             time.sleep(0.1)
 
@@ -261,6 +268,7 @@ class TestDecorators:
 
     def test_method_decorator(self, qapp) -> None:
         """Test @method decorator."""
+
         @method()
         def compute(x):
             return x * 2

@@ -11,6 +11,7 @@ executors (without tearing down sockets) lets the process exit on its own.
 ``get_caproto_context`` never *creates* a context: at shutdown we only want
 the one caproto already built, not a fresh one (which would spawn threads).
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -61,9 +62,7 @@ def drain_callback_executors(ctx: Any | None) -> int:
                 executor.shutdown(wait=False, cancel_futures=True)
                 drained += 1
             except Exception as e:
-                logger.warning(
-                    "Failed to shut down a caproto callback executor: {}", e
-                )
+                logger.warning("Failed to shut down a caproto callback executor: {}", e)
     except Exception as e:
         logger.warning("Draining caproto callback executors failed: {}", e)
     return drained

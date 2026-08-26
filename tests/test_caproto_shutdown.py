@@ -4,6 +4,7 @@ The drain path must stop each circuit's user-callback ThreadPoolExecutor
 (so its non-daemon workers don't stall interpreter exit) without touching
 sockets, and must be robust to partially-formed / absent contexts.
 """
+
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor

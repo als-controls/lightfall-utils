@@ -468,19 +468,23 @@ class ThemeManager(QObject):
 
             registry = ThemeRegistry.get_instance()
             for plugin in registry.get_all():
-                themes.append({
-                    "name": plugin.name,
-                    "display_name": plugin.display_name,
-                    "is_dark": plugin.is_dark,
-                })
+                themes.append(
+                    {
+                        "name": plugin.name,
+                        "display_name": plugin.display_name,
+                        "is_dark": plugin.is_dark,
+                    }
+                )
         except ImportError:
             # Registry not available, use fallback
             logger.debug("ThemeRegistry not available, using fallback themes")
-            themes.extend([
-                {"name": "light", "display_name": "Light", "is_dark": False},
-                {"name": "slate", "display_name": "Slate (Dark)", "is_dark": True},
-                {"name": "darkblue", "display_name": "Dark Blue", "is_dark": True},
-            ])
+            themes.extend(
+                [
+                    {"name": "light", "display_name": "Light", "is_dark": False},
+                    {"name": "slate", "display_name": "Slate (Dark)", "is_dark": True},
+                    {"name": "darkblue", "display_name": "Dark Blue", "is_dark": True},
+                ]
+            )
 
         return themes
 
@@ -932,6 +936,7 @@ QHeaderView::section {{
         if self._islands_mode:
             try:
                 from lightfall_utils.theming.builtin import generate_islands_stylesheet
+
                 base_stylesheet += f"\n{generate_islands_stylesheet(c)}"
             except ImportError:
                 pass

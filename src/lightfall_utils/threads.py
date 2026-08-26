@@ -454,8 +454,8 @@ class QThreadFuture(QThread):
     # Signals for cross-thread callback delivery
     # Qt handles thread marshalling automatically when these are emitted
     sigResult = Signal(object)  # Emitted with return value
-    sigError = Signal(object)   # Emitted with exception
-    sigDone = Signal()          # Emitted when finished successfully
+    sigError = Signal(object)  # Emitted with exception
+    sigDone = Signal()  # Emitted when finished successfully
     sigProgress = Signal(object, object, object, object)  # (thread, current, minimum, maximum)
 
     def __init__(
@@ -901,7 +901,9 @@ class _Invoker(QObject):
         return super().event(event)
 
 
-def invoke_in_main_thread(fn: Callable[..., Any], *args: Any, force_event: bool = False, **kwargs: Any) -> None:
+def invoke_in_main_thread(
+    fn: Callable[..., Any], *args: Any, force_event: bool = False, **kwargs: Any
+) -> None:
     """Invoke a callable in the main thread.
 
     If already in the main thread and force_event is False, calls immediately.
@@ -969,6 +971,7 @@ def method(
         # Override callback at call time:
         future = compute(5, _callback_slot=other_handler)
     """
+
     def decorator(func: Callable[..., T]) -> Callable[..., QThreadFuture]:
         @wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> QThreadFuture:
@@ -1035,7 +1038,10 @@ def iterator(
 
         future = process_items(my_items)
     """
-    def decorator(func: Callable[..., Generator[Any, None, T]]) -> Callable[..., QThreadFutureIterator]:
+
+    def decorator(
+        func: Callable[..., Generator[Any, None, T]],
+    ) -> Callable[..., QThreadFutureIterator]:
         @wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> QThreadFutureIterator:
             # Extract override kwargs
