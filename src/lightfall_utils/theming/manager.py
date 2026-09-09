@@ -758,10 +758,39 @@ QToolTip {{
     padding: 4px;
 }}
 
+/* Menu bar. The foreground is NOT optional: with a global stylesheet active,
+   QStyleSheetStyle stops deferring menu-bar item text to the palette and falls
+   through to the platform style's own colour, which on Windows 11 is the system
+   menu text -- white -- so every light theme drew white-on-white and the menu
+   bar read as blank. */
+QMenuBar {{
+    background-color: {c.background};
+    color: {c.text};
+}}
+QMenuBar::item {{
+    background: transparent;
+    color: {c.text};
+    padding: 4px 8px;
+}}
+QMenuBar::item:selected {{
+    background-color: {c.surface};
+    color: {c.text};
+}}
+QMenuBar::item:disabled {{
+    color: {c.text_secondary};
+}}
+
 /* Menu */
 QMenu {{
     background-color: {c.background};
+    color: {c.text};
     border: 1px solid {c.border};
+}}
+QMenu::item {{
+    color: {c.text};
+}}
+QMenu::item:disabled {{
+    color: {c.text_secondary};
 }}
 QMenu::item {{
     padding: 6px 24px;
