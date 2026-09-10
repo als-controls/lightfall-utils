@@ -28,6 +28,7 @@ dev = [
     "caproto>=1.1",
     "nats-server-bin>=2.14",
     "pytest>=8.0",
+    "pytest-asyncio>=0.24",
     "pytest-cov>=4.0",
     "pytest-qt>=4.2",
     "ruff>=0.1",
@@ -64,6 +65,7 @@ known-first-party = ["lightfall_utils"]
 testpaths = ["tests"]
 addopts = "-ra -q"
 qt_api = "pyside6"
+asyncio_mode = "auto"
 
 [tool.pyright]
 include = ["src"]

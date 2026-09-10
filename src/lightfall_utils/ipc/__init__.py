@@ -17,14 +17,13 @@ from lightfall_utils.ipc.protocol import (
     error_reply,
     ok_reply,
 )
+from lightfall_utils.ipc.service import ActionInfo, EventInfo, IPCService
 from lightfall_utils.ipc.trust import TrustDialog, TrustManager, TrustState
 
 __all__ = [
-    "BASE_ERROR_CODES",
-    "CONTRACT_VERSION",
-    "ErrorCodes",
-    "error_reply",
-    "ok_reply",
+    "IPCService",
+    "ActionInfo",
+    "EventInfo",
     "TrustDialog",
     "TrustManager",
     "TrustState",
@@ -33,7 +32,12 @@ __all__ = [
     "NatsBinaryNotFoundError",
     "NatsPortInUseError",
     "NatsReadinessTimeoutError",
+    "resolve_nats_binary",
     "nats_binary_version",
     "probe_nats",
-    "resolve_nats_binary",
+    "BASE_ERROR_CODES",
+    "CONTRACT_VERSION",
+    "ErrorCodes",
+    "error_reply",
+    "ok_reply",
 ]
