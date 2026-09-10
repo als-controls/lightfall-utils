@@ -12,13 +12,24 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-__all__ = ["BASE_ERROR_CODES", "CONTRACT_VERSION", "ErrorCodes", "error_reply", "ok_reply"]
+__all__ = [
+    "BASE_ERROR_CODES",
+    "ERROR_CODES",
+    "CONTRACT_VERSION",
+    "ErrorCodes",
+    "error_reply",
+    "ok_reply",
+]
 
 CONTRACT_VERSION = 1
 
 BASE_ERROR_CODES = frozenset(
     {"busy", "limits", "timeout", "unknown", "denied", "bad_request", "version_mismatch"}
 )
+
+# Backward-compatible alias: Lightfall's original ``lightfall.remote.protocol``
+# exported ``ERROR_CODES``; keep that name working for callers migrating over.
+ERROR_CODES = BASE_ERROR_CODES
 
 
 def ok_reply(**fields: Any) -> dict:

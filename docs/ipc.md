@@ -69,13 +69,20 @@ handle = service.register_action(
 
 Later, unregister with `handle.unregister()`.
 
+### Trusted (capability-channel-only) actions
+
+Pass `trusted=True` to `register_action()` to make an action reachable only
+through a session capability channel (see "Trust Handshake Sequence" above).
+A request sent to its bare, non-session subject gets a structured `denied`
+error reply instead of reaching the handler; the request must instead be
+sent to `{prefix}.session.{token}.<suffix>` with a token obtained from a
+completed `auth.request` handshake.
+
 ## Building Auth Responses
 
 Use `build_auth_response()` to construct handshake replies:
 
 ```python
-from lightfall_utils.ipc import ok_reply
-
 # Approved with extra fields (e.g., session metadata)
 response = service.build_auth_response(
     approved=True,
@@ -179,6 +186,7 @@ service.set_trust_manager(trust)
 state = service.evaluate_trust("remote-app")
 if state == TrustState.UNKNOWN:
     # Prompt user with TrustDialog
+    from PySide6.QtWidgets import QDialog
     from lightfall_utils.ipc import TrustDialog
     dialog = TrustDialog("remote-app", app_version="1.0", parent=main_window)
     if dialog.exec() == QDialog.Accepted:

@@ -3,10 +3,17 @@ import pytest
 from lightfall_utils.ipc.protocol import (
     BASE_ERROR_CODES,
     CONTRACT_VERSION,
+    ERROR_CODES,
     ErrorCodes,
     error_reply,
     ok_reply,
 )
+
+
+def test_error_codes_alias_is_the_base_set():
+    # Lightfall's original lightfall.remote.protocol exported ERROR_CODES;
+    # the re-export must keep working (and stay the very same object).
+    assert ERROR_CODES is BASE_ERROR_CODES
 
 
 def test_ok_reply_carries_the_contract_version():

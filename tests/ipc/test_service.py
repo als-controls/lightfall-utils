@@ -286,6 +286,12 @@ class TestAuthHandshake:
         assert isinstance(reply["session_token"], str) and len(reply["session_token"]) > 20
         assert svc.session_channel_count == 1
 
+    def test_build_auth_response_extra_cannot_overwrite_status(self):
+        svc = IPCService("nats://unused", topic_prefix="als.test")
+        svc.set_trust_manager(TrustManager())
+        reply = svc.build_auth_response(approved=True, extra={"status": "hijacked"})
+        assert reply["status"] == "approved"
+
     def test_build_auth_response_denied_carries_reason_only_when_given(self):
         svc = IPCService("nats://unused")
         assert svc.build_auth_response(approved=False) == {

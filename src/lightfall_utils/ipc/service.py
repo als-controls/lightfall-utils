@@ -1,4 +1,4 @@
-"""NATS-based IPC service for Lightfall.
+"""NATS-based IPC service for NCS applications.
 
 Provides a Qt-integrated wrapper around nats-py that handles connection
 lifecycle, topic routing, pub/sub, and request/reply patterns.
@@ -356,7 +356,8 @@ class IPCService(QObject):
         when non-empty.
         """
         if approved:
-            response: dict = {"status": "approved", **(dict(extra) if extra else {})}
+            response: dict = {**(dict(extra) if extra else {})}
+            response["status"] = "approved"
             response["contract_version"] = CONTRACT_VERSION
             if app_name:
                 response["session_token"] = self.mint_session_channel(app_name)
@@ -714,7 +715,8 @@ class IPCService(QObject):
     def _run_loop(self) -> None:
         """Entry point for the background daemon thread."""
         loop = self._loop
-        assert loop is not None  # set by start() before this thread is spawned
+        if loop is None:
+            raise RuntimeError("start() must set the loop before the thread runs")
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(self._connect_and_serve())
