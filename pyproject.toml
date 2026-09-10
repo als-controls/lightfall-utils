@@ -65,7 +65,6 @@ known-first-party = ["lightfall_utils"]
 testpaths = ["tests"]
 addopts = "-ra -q"
 qt_api = "pyside6"
-asyncio_mode = "auto"
 
 [tool.pyright]
 include = ["src"]
