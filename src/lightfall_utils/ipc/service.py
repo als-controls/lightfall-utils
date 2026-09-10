@@ -25,7 +25,7 @@ from PySide6.QtCore import QObject, Signal
 
 from lightfall_utils.ipc.protocol import CONTRACT_VERSION, error_reply
 from lightfall_utils.ipc.trust import TrustManager, TrustState
-from lightfall_utils.threads import invoke_in_main_thread
+from lightfall_utils.threads import initialize_main_thread_invoker, invoke_in_main_thread
 
 __all__ = ["IPCService", "ActionInfo", "EventInfo", "_ActionHandle"]
 
@@ -554,6 +554,14 @@ class IPCService(QObject):
     def start(self) -> None:
         """Connect to NATS on a background thread.
 
+        Must be called from the main thread: it initializes the
+        ``invoke_in_main_thread`` invoker (belt and braces -- ``_get_invoker()``
+        also defends against this, but doing it here up front, before the NATS
+        thread exists, guarantees the invoker is set up before anything can
+        possibly race it) before spawning the background NATS thread that
+        delivers callbacks (e.g. ``discover_peers`` replies) via
+        ``invoke_in_main_thread``.
+
         Does nothing when ``nats_url`` is empty or already running.
         """
         if not self._nats_url:
@@ -561,6 +569,7 @@ class IPCService(QObject):
         if self._thread is not None:
             return
 
+        initialize_main_thread_invoker()
         self._shutdown_event.clear()
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(

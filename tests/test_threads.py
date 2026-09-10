@@ -1,5 +1,6 @@
 """Tests for the threading module."""
 
+import threading
 import time
 
 from lightfall_utils.threads import (
@@ -482,3 +483,48 @@ class TestUtilities:
 
         qapp.processEvents()
         assert results == ["called"]
+
+    def test_invoker_created_from_a_background_thread_still_delivers_on_main_thread(
+        self, qapp, monkeypatch
+    ) -> None:
+        """Regression test for the invoker-thread-affinity bug.
+
+        The ``_Invoker`` singleton used to be left on whichever thread
+        constructed it. If a background thread called
+        ``invoke_in_main_thread`` before anything else had, the invoker ended
+        up bound to that background thread -- which runs no Qt event loop --
+        so ``QCoreApplication.postEvent`` silently dropped the callback
+        forever. ``_get_invoker()`` now moves a freshly created invoker onto
+        the QApplication's thread, so this must still deliver on the main
+        thread even when constructed from a background thread first.
+        """
+        import lightfall_utils.threads as threads_mod
+
+        # Force a fresh invoker so this test actually exercises first-time
+        # construction, regardless of what earlier tests in this session did.
+        monkeypatch.setattr(threads_mod, "_invoker", None)
+        monkeypatch.setattr(threads_mod, "_invoke_event_type", None)
+
+        seen_thread_ids: list[int] = []
+
+        def callback() -> None:
+            seen_thread_ids.append(threading.get_ident())
+
+        def call_from_background_thread() -> None:
+            invoke_in_main_thread(callback)
+
+        bg_thread = threading.Thread(target=call_from_background_thread)
+        bg_thread.start()
+        bg_thread.join()
+
+        # Not delivered yet: invoke_in_main_thread posted an event (the
+        # calling thread wasn't the main thread) rather than calling directly.
+        assert seen_thread_ids == []
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and not seen_thread_ids:
+            qapp.processEvents()
+            time.sleep(0.01)
+
+        assert seen_thread_ids == [threading.get_ident()]
+        assert threading.current_thread() is threading.main_thread()

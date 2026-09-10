@@ -849,12 +849,35 @@ def _get_invoke_event_type() -> QEvent.Type:
 
 
 def _get_invoker() -> _Invoker:
-    """Get or create the invoker singleton (lazy initialization)."""
+    """Get or create the invoker singleton (lazy initialization).
+
+    The invoker must live on the Qt main thread for ``QCoreApplication.postEvent``
+    to actually deliver events to it -- a ``QObject`` processes events on
+    whichever thread it lives on, not the thread that created it. If this is
+    called for the first time from a background thread (e.g. a background
+    thread's very first ``invoke_in_main_thread`` call, before
+    ``initialize_main_thread_invoker()`` has run), the freshly constructed
+    invoker is immediately moved to ``QCoreApplication.instance().thread()``
+    -- the thread that owns the application's main event loop -- rather than
+    staying on the thread that happened to construct it. A ``QObject`` may be
+    moved to another thread only by the thread that currently owns it, so
+    this must happen right here, before any event is posted to it.
+
+    If no ``QApplication``/``QCoreApplication`` exists yet, the invoker is
+    left on whatever thread constructed it -- there is no main-thread event
+    loop to move it onto anyway, and a subsequent
+    ``initialize_main_thread_invoker()`` call (or a later app-created
+    ``QApplication``) will not retroactively fix its thread affinity.
+    """
     global _invoker
     if _invoker is None:
         with _invoker_lock:
             if _invoker is None:
-                _invoker = _Invoker()
+                invoker = _Invoker()
+                app = QCoreApplication.instance()
+                if app is not None and invoker.thread() is not app.thread():
+                    invoker.moveToThread(app.thread())
+                _invoker = invoker
     return _invoker
 
 
@@ -862,10 +885,15 @@ def initialize_main_thread_invoker() -> None:
     """Initialize the invoker on the main thread.
 
     Call this after QApplication is created but before starting any
-    background threads that use invoke_in_main_thread().
+    background threads that use invoke_in_main_thread(). This is the
+    recommended way to set up the invoker: it constructs it directly on the
+    main thread, so no thread migration is ever needed.
 
-    This is required because the invoker (a QObject) must be created
-    on the main thread for proper event delivery.
+    ``_get_invoker()`` also defends against a background thread calling
+    ``invoke_in_main_thread`` first (moving the invoker onto the
+    QApplication's thread after the fact), but calling this function
+    explicitly up front is still preferred -- it is guaranteed to work even
+    if no QApplication exists yet at the time of that first background call.
     """
     if not is_main_thread():
         raise RuntimeError("initialize_main_thread_invoker must be called from main thread")

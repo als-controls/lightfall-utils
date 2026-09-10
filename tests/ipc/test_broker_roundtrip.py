@@ -18,21 +18,11 @@ import nats
 import pytest
 
 from lightfall_utils.ipc import IPCService, LocalNatsServer, TrustManager, TrustState, ok_reply
-from lightfall_utils.threads import initialize_main_thread_invoker
 
-
-@pytest.fixture(scope="module", autouse=True)
-def _main_thread_invoker(qapp):
-    """Peer discovery replies are delivered via ``invoke_in_main_thread``.
-
-    That helper lazily creates its ``_Invoker`` QObject wherever it is first
-    called from — if that first call happens to come from a background NATS
-    loop thread (as it does for ``discover_peers()``), the invoker ends up
-    bound to a thread with no Qt event loop and every subsequent post is
-    silently lost forever. Initializing it here, up front, from the main
-    thread avoids that trap.
-    """
-    initialize_main_thread_invoker()
+# No manual invoker workaround needed here: IPCService.start() now calls
+# initialize_main_thread_invoker() itself (see lightfall_utils.threads) before
+# spawning the NATS background thread, so these tests exercise the production
+# fix for the invoker-thread-affinity bug rather than papering over it.
 
 
 def _free_port() -> int:
