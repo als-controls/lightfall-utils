@@ -32,8 +32,9 @@ When an app re-authenticates, existing tokens for that app are revoked.
 ```python
 from lightfall_utils.ipc import IPCService, ErrorCodes, ok_reply
 
-# Initialize the service
-service = IPCService("als.lightfall", "My Application")
+# Initialize the service (connecting to NATS server at construction)
+service = IPCService("nats://localhost:4222", topic_prefix="als.myapp")
+service.start()  # Connect to the NATS broker on a background thread
 
 # Define app-specific error codes
 app_errors = ErrorCodes("not_found", "validation_failed")
@@ -138,8 +139,9 @@ service.register_event(
     schema={"type": "object", "properties": {"scan_id": {"type": "string"}}},
 )
 
-# Later, publish events directly
-service.publish("events.scan.completed", {"scan_id": "s-789"})
+# Later, publish events directly; note that publish() takes the full subject
+# (not a suffix), so use service.topic() to apply the prefix
+service.publish(service.topic("events.scan.completed"), {"scan_id": "s-789"})
 ```
 
 ## Local Development: LocalNatsServer
@@ -147,13 +149,13 @@ service.publish("events.scan.completed", {"scan_id": "s-789"})
 For testing without an external NATS broker, use `LocalNatsServer`:
 
 ```python
-from lightfall_utils.ipc import LocalNatsServer
+from lightfall_utils.ipc import LocalNatsServer, IPCService
 
 server = LocalNatsServer()
 server.start()  # Starts a managed nats-server process
 
-service = IPCService("als.test", "Test App")
-service.start(nats_url="nats://localhost:4222")  # Connect to the local server
+service = IPCService("nats://localhost:4222", topic_prefix="als.test")
+service.start()  # Connect to the local server
 
 # ...
 
