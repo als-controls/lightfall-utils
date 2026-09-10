@@ -7,5 +7,15 @@ from lightfall_utils.ipc.protocol import (
     error_reply,
     ok_reply,
 )
+from lightfall_utils.ipc.trust import TrustDialog, TrustManager, TrustState
 
-__all__ = ["BASE_ERROR_CODES", "CONTRACT_VERSION", "ErrorCodes", "error_reply", "ok_reply"]
+__all__ = [
+    "BASE_ERROR_CODES",
+    "CONTRACT_VERSION",
+    "ErrorCodes",
+    "error_reply",
+    "ok_reply",
+    "TrustDialog",
+    "TrustManager",
+    "TrustState",
+]
