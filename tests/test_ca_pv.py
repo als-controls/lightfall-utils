@@ -1,6 +1,7 @@
 """Integration tests: PV bridge against a live caproto soft IOC."""
 
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -10,20 +11,39 @@ import pytest
 
 from lightfall_utils.ca import PV, SharedContext
 
-_LOCAL_ENV = {
-    "EPICS_CA_ADDR_LIST": "127.0.0.1",
-    "EPICS_CA_AUTO_ADDR_LIST": "NO",
-}
+
+def _free_ca_port() -> int:
+    """A port free for both TCP and UDP on loopback.
+
+    The default CA port 5064 is often taken on dev machines (another IOC, or a
+    container publishing 127.0.0.1:5064, which shadows a 0.0.0.0 bind).
+    """
+    for _ in range(20):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as tcp:
+            tcp.bind(("127.0.0.1", 0))
+            port = tcp.getsockname()[1]
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+                    udp.bind(("0.0.0.0", port))
+            except OSError:
+                continue
+            return port
+    raise RuntimeError("no free CA port found")
 
 
 @pytest.fixture()
 def softioc(monkeypatch):
-    for key, value in _LOCAL_ENV.items():
+    local_env = {
+        "EPICS_CA_ADDR_LIST": "127.0.0.1",
+        "EPICS_CA_AUTO_ADDR_LIST": "NO",
+        "EPICS_CA_SERVER_PORT": str(_free_ca_port()),
+    }
+    for key, value in local_env.items():
         monkeypatch.setenv(key, value)
     prefix = f"lfutest{os.getpid()}:"
     proc = subprocess.Popen(
         [sys.executable, str(Path(__file__).parent / "ca_ioc.py"), prefix],
-        env={**os.environ, **_LOCAL_ENV},
+        env={**os.environ, **local_env},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
