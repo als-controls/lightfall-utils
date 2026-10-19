@@ -12,7 +12,11 @@ requires-python = ">=3.11"
 authors = [{ name = "ALS Controls Team" }]
 dynamic = ["version"]
 dependencies = [
-    "PySide6>=6.6",
+    # PySide6 6.12.0 drops a reference to None/True on every void-returning call and
+    # signal emit (PYSIDE-3486, PYSIDE-3474). Harmless on Python 3.12+ (immortal
+    # singletons); on 3.11 Python aborts after a few thousand calls.
+    "PySide6>=6.6,<6.12; python_version < '3.12'",
+    "PySide6>=6.6; python_version >= '3.12'",
     "loguru>=0.7",
     "pydantic>=2.0",
     "pyyaml>=6.0",
