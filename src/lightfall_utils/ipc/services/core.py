@@ -58,13 +58,21 @@ class NatsCore:
         if nc is not None:
             await nc.drain()
 
+    def _conn(self) -> Any:
+        if self._nc is None:
+            raise RuntimeError("not connected")
+        return self._nc
+
+    async def flush(self, timeout: float = DEFAULT_TIMEOUT_S) -> None:
+        await self._conn().flush(timeout=timeout)
+
     async def subscribe(self, subject: str, cb: Callable[[Msg], Awaitable[None]]):
-        return await self._nc.subscribe(subject, cb=cb)
+        return await self._conn().subscribe(subject, cb=cb)
 
     async def publish(
         self, subject: str, data: bytes, headers: dict[str, str] | None = None
     ) -> None:
-        await self._nc.publish(subject, data, headers=headers)
+        await self._conn().publish(subject, data, headers=headers)
 
     async def publish_json(self, subject: str, obj: Any) -> None:
         await self.publish(subject, json.dumps(obj).encode())
@@ -74,12 +82,12 @@ class NatsCore:
     ) -> dict:
         if subject.startswith(_PRIV_PREFIX):
             raise ValueError("request_public may not target a _PRIV.* subject")
-        msg = await self._nc.request(subject, json.dumps(payload).encode(), timeout=timeout)
+        msg = await self._conn().request(subject, json.dumps(payload).encode(), timeout=timeout)
         return json.loads(msg.data)
 
     async def request_private(
         self, subject: str, payload: dict, timeout: float = DEFAULT_TIMEOUT_S
     ) -> dict:
         return await private_request(
-            self._nc, subject, payload, timeout, inbox_prefix=self._cap.inbox_prefix
+            self._conn(), subject, payload, timeout, inbox_prefix=self._cap.inbox_prefix
         )

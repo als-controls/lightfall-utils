@@ -164,3 +164,35 @@ def test_connect_passes_tls_when_given(monkeypatch):
     ctx = ssl.create_default_context()
     asyncio.run(NatsCore("tls://h:1", tls=ctx).connect())
     assert seen["tls"] is ctx
+
+
+def test_methods_raise_before_connect():
+    core = NatsCore("nats://unused")
+
+    async def go():
+        for coro in (
+            core.subscribe("x", None),
+            core.publish("x", b""),
+            core.publish_json("x", {}),
+            core.request_public("x", {}),
+            core.request_private("_PRIV.abc.x", {}),
+            core.flush(),
+        ):
+            with pytest.raises(RuntimeError, match="not connected"):
+                await coro
+
+    asyncio.run(go())
+
+
+def test_methods_raise_after_close(broker_url):
+    async def go():
+        core = NatsCore(broker_url)
+        await core.connect()
+        await core.flush()
+        await core.close()
+        with pytest.raises(RuntimeError, match="not connected"):
+            await core.publish("x", b"")
+        with pytest.raises(RuntimeError, match="not connected"):
+            await core.flush()
+
+    asyncio.run(go())
