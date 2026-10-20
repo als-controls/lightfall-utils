@@ -249,6 +249,95 @@ Requires `pip install lightfall-utils[local-nats]`.
 The local broker listens on 127.0.0.1 and has no auth callout: everything on the host is trusted.
 `IPCService` still sends its token and inbox prefix, which a plain `nats-server` ignores.
 
+## Services
+
+`lightfall_utils.ipc.services` is a Qt-free asyncio pattern for out-of-process services: a
+`ServiceHost` inside the service, a `ServiceClient` inside the caller (Lightfall wraps it with
+the `ServiceManager`; `lightfall_utils.ipc.services.qt` is the only Qt module). It builds on the
+connection capability above, so every command, event and stream chunk travels on `_PRIV.*`
+subjects. Only discovery, `meta.info` and the heartbeat are public. See the Lightfall
+[NATS use model](https://github.com/als-controls/lightfall/blob/master/docs/developer-guide/nats-use-model.md)
+for the security rationale.
+
+Subjects live under `{scope}.svc.{service}`: `meta.info`, `heartbeat` and `events.<name>` are
+public; the handshake is `{priv_root}.auth.request`; commands are
+`{priv_root}.session.{token}.rpc.<action>`; per-session events go to the client's own
+`{client_priv_root}.d.{delivery_token}.<name>`.
+
+### Host
+
+```python
+from lightfall_utils.ipc.services.host import ServiceHost
+from lightfall_utils.ipc.services.cli import run_service
+
+host = ServiceHost("echo", "lightfall.local", contract="1.0", version="0.1")
+
+@host.rpc("echo")
+async def echo(session, payload: dict) -> dict:
+    return {"echo": payload}
+
+run_service(host)   # python -m ... --scope S --nats-url URL [--token-stdin]
+```
+
+`lightfall_utils.ipc.services.echo` is the reference service (`echo`, `slow`, and a `bytes`
+stream that emits a `stream_total` event). Use `host.emit(session, name, payload)` for
+per-session events and `host.emit_chunk(...)` for binary chunks.
+
+### Client
+
+```python
+from lightfall_utils.ipc.services.core import NatsCore
+from lightfall_utils.ipc.services.client import ServiceClient
+from lightfall_utils.ipc.services.descriptor import ServiceDescriptor
+
+core = NatsCore("nats://127.0.0.1:4223")
+await core.connect()
+desc = ServiceDescriptor(name="echo", scope="lightfall.local", contract="1.0", launch="external")
+client = ServiceClient(desc, core, scope="lightfall.local", app_name="me", app_version="1.0")
+client.on_state(print)                 # unknown/starting/up/degraded/down/incompatible/unauthorized
+client.on_event("stream_total", print)
+await client.start()
+reply = await client.call("echo", {"x": 1})   # {"status": "ok", "echo": {"x": 1}, ...}
+await client.close()
+```
+
+The client checks `svc_protocol` (exact) and `contract` (same major, minor at least the
+descriptor's), performs the handshake, then leases the session with a ping every 5 s (the
+service expires a session after 30 s without one). Heartbeats are every 2 s; one missed beat
+is `degraded`, three is `down`.
+
+### CLI flags
+
+`run_service` accepts `--scope`, `--nats-url`, `--token-stdin` (read the session token from
+one stdin line and exit on stdin EOF; used when Lightfall launches the service) and
+`--log-level`. The service also exits on `rpc.shutdown`, SIGTERM or SIGINT.
+
+### Descriptor
+
+`ServiceDescriptor(name, scope, contract, launch, command, stop_with_client, single_instance,
+interpreter_pref, hint)`. `launch` is `"local"` (Lightfall spawns it; `command` omits the
+interpreter, e.g. `("-m", "lightfall_utils.ipc.services.echo")`) or `"external"` (already
+running, reached over the main broker). `scope` may use `{prefix}`, `{hostname}` and
+`{client_instance}`; a local scope is `{prefix}.host.{hostname}.{client_instance}`.
+
+### Local broker
+
+Local services use a private broker on `127.0.0.1:4223` (preference `services_local_port`),
+plain `nats://`, started by each Lightfall if nothing answers on that port. It has no auth
+callout, so everything on the host is trusted. External services go through the main broker
+and its callout, which enforces the isolation described above.
+
+### Security notes
+
+- Every request to a `_PRIV.*` subject uses `capability.private_request`; never `nc.request`.
+- The service refuses an `auth.request` whose `client_priv_root` prefix differs from the one in
+  the request's reply subject, so a client cannot redirect deliveries to someone else.
+- Session and delivery tokens are unguessable subject tokens; a spy cannot subscribe to
+  another connection's `_PRIV.<p>.>` and cannot forge a delivery without the token.
+- `tests/ipc/services/test_replica_isolation.py` checks this against the `bcgnats-auth-callout`
+  replica; run it with `BCGNATS_REPLICA_URL=nats://127.0.0.1:4399` (start
+  `replica --port 4399`).
+
 ## Trust Management
 
 Use a `TrustManager` to track which applications are trusted:
