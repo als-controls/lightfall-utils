@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from lightfall_utils.ipc.capability import new_capability
 from lightfall_utils.ipc.service import IPCService
 
 # ---------------------------------------------------------------------------
@@ -17,6 +18,7 @@ def _make_svc(prefix: str = "als.test") -> IPCService:
 
     svc = IPCService.__new__(IPCService)
     svc._topic_prefix = prefix
+    svc._capability = new_capability()
     svc._subscriptions = {}
     svc._action_catalog = {}
     svc._event_catalog = {}

@@ -345,3 +345,38 @@ class TestInstanceIdentity:
     def test_display_name_settable(self, svc):
         svc.display_name = "CMS Hutch"
         assert svc.display_name == "CMS Hutch"
+
+
+class TestCapabilityConnect:
+    def test_connect_uses_capability(self, qapp):
+        svc = IPCService(nats_url="nats://localhost:4222", topic_prefix="test")
+        svc._shutdown_event.set()
+        fake_nc = MagicMock()
+        with patch("lightfall_utils.ipc.service.nats.connect", new=MagicMock()) as conn:
+
+            async def _fake(*a, **kw):
+                return fake_nc
+
+            conn.side_effect = _fake
+            asyncio.run(svc._connect_and_serve())
+        kwargs = conn.call_args.kwargs
+        assert kwargs["token"] == svc._capability.secret
+        assert kwargs["inbox_prefix"] == svc._capability.inbox_prefix
+        assert svc.priv_root == svc._capability.priv_root
+
+    def test_permission_violation_is_logged(self, qapp):
+        import nats.errors
+        from loguru import logger
+
+        svc = IPCService(nats_url="nats://localhost:4222", topic_prefix="test")
+        records = []
+        hid = logger.add(lambda m: records.append(m.record), level="WARNING")
+        try:
+            asyncio.run(
+                svc._error_cb(
+                    nats.errors.Error('permissions violation for subscription to "lab.x"')
+                )
+            )
+        finally:
+            logger.remove(hid)
+        assert any(r["level"].name == "WARNING" and "lab.x" in r["message"] for r in records)

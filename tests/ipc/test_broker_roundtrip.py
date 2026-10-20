@@ -134,7 +134,9 @@ class TestTrustedActionOnSessionChannel:
         service.register_action("commands.run", handler, trusted=True, main_thread=False)
         token = service.mint_session_channel("camphor")
 
-        result = nats_request(broker_url, f"als.test.session.{token}.commands.run", {"x": 42})
+        result = nats_request(
+            broker_url, f"{service.priv_root}.session.{token}.commands.run", {"x": 42}
+        )
         assert result is not None
         assert result["contract_version"] == 1
         assert result["echo"] == 42
@@ -150,7 +152,7 @@ class TestSessionTeardown:
         service.teardown_session_channels(app_name="camphor")
 
         result = nats_request(
-            broker_url, f"als.test.session.{token}.commands.run2", {}, timeout=0.5
+            broker_url, f"{service.priv_root}.session.{token}.commands.run2", {}, timeout=0.5
         )
         assert result is None or result.get("code") == "denied"
 

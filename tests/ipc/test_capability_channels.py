@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import threading
 
+import pytest
+
+from lightfall_utils.ipc.capability import new_capability
 from lightfall_utils.ipc.service import IPCService
 
 
@@ -15,6 +18,7 @@ def _make_ipc(prefix: str = "als.test") -> tuple[IPCService, list[tuple[str, dic
     """Build a disconnected IPCService whose publish() captures messages."""
     ipc = IPCService.__new__(IPCService)
     ipc._topic_prefix = prefix
+    ipc._capability = new_capability()
     ipc._subscriptions = {}
     ipc._action_catalog = {}
     ipc._event_catalog = {}
@@ -43,7 +47,7 @@ class TestMint:
         ipc, _ = _make_ipc()
         token = ipc.mint_session_channel("pystxm")
         assert len(token) >= 22  # token_urlsafe(32) -> 43 chars; 128-bit floor
-        assert f"als.test.session.{token}.>" in ipc._subscriptions
+        assert f"{ipc.priv_root}.session.{token}.>" in ipc._subscriptions
 
     def test_mint_twice_gives_distinct_tokens(self):
         ipc, _ = _make_ipc()
@@ -64,20 +68,22 @@ class TestMint:
         assert ipc.session_channel_count == 1
         assert old_token != new_token
 
-        old_wildcard = f"als.test.session.{old_token}.>"
+        old_wildcard = f"{ipc.priv_root}.session.{old_token}.>"
         assert old_wildcard not in ipc._subscriptions
 
         # Old token routes to denied (its subscription is gone; simulate a
         # stray in-flight message by calling the router logic directly via
         # _route_session_message, which looks the token up in the dict).
-        ipc._route_session_message(f"als.test.session.{old_token}.commands.t.d", {}, "_INBOX.old")
+        ipc._route_session_message(
+            f"{ipc.priv_root}.session.{old_token}.commands.t.d", {}, "_INBOX.old"
+        )
         assert sent[-1][1]["status"] == "error"
         assert sent[-1][1]["code"] == "denied"
 
         # New token still works.
-        new_wildcard = f"als.test.session.{new_token}.>"
+        new_wildcard = f"{ipc.priv_root}.session.{new_token}.>"
         router = ipc._subscriptions[new_wildcard].callback
-        router(f"als.test.session.{new_token}.commands.t.d", {"x": 1}, "_INBOX.new")
+        router(f"{ipc.priv_root}.session.{new_token}.commands.t.d", {"x": 1}, "_INBOX.new")
         assert seen == [{"x": 1, "_identity": {"app_name": "pystxm", "session_token": new_token}}]
 
     def test_reauth_does_not_affect_other_apps_channel(self):
@@ -86,7 +92,7 @@ class TestMint:
         ipc.mint_session_channel("pystxm")
         ipc.mint_session_channel("pystxm")
 
-        other_wildcard = f"als.test.session.{other_token}.>"
+        other_wildcard = f"{ipc.priv_root}.session.{other_token}.>"
         assert other_wildcard in ipc._subscriptions
         assert ipc.session_channel_count == 2
 
@@ -102,12 +108,12 @@ class TestRouting:
             main_thread=False,
         )
         token = ipc.mint_session_channel("pystxm")
-        wildcard = f"als.test.session.{token}.>"
+        wildcard = f"{ipc.priv_root}.session.{token}.>"
         assert wildcard in ipc._subscriptions
         # Deliver a request the way _make_handler would: the wildcard
         # subscription's callback invoked with the REAL message subject.
         ipc._subscriptions[wildcard].callback(
-            f"als.test.session.{token}.commands.thing.do", {"x": 1}, "_INBOX.1"
+            f"{ipc.priv_root}.session.{token}.commands.thing.do", {"x": 1}, "_INBOX.1"
         )
         assert calls == [
             (
@@ -126,8 +132,8 @@ class TestRouting:
             main_thread=False,
         )
         token = ipc.mint_session_channel("pystxm")
-        router = ipc._subscriptions[f"als.test.session.{token}.>"].callback
-        router(f"als.test.session.{token}.commands.thing.do", {"x": 1}, "_INBOX.1")
+        router = ipc._subscriptions[f"{ipc.priv_root}.session.{token}.>"].callback
+        router(f"{ipc.priv_root}.session.{token}.commands.thing.do", {"x": 1}, "_INBOX.1")
         assert len(seen) == 1
         subject, data = seen[0]
         assert subject == "commands.thing.do"
@@ -141,9 +147,9 @@ class TestRouting:
             "commands.t.d", lambda s, d, r: seen.append(d), trusted=True, main_thread=False
         )
         token = ipc.mint_session_channel("appA")
-        router = ipc._subscriptions[f"als.test.session.{token}.>"].callback
+        router = ipc._subscriptions[f"{ipc.priv_root}.session.{token}.>"].callback
         router(
-            f"als.test.session.{token}.commands.t.d",
+            f"{ipc.priv_root}.session.{token}.commands.t.d",
             {"_identity": {"app_name": "fake"}},
             "_INBOX.1",
         )
@@ -152,8 +158,8 @@ class TestRouting:
     def test_unknown_suffix_on_channel_gets_unknown_error(self):
         ipc, sent = _make_ipc()
         token = ipc.mint_session_channel("appA")
-        router = ipc._subscriptions[f"als.test.session.{token}.>"].callback
-        router(f"als.test.session.{token}.commands.nope", {}, "_INBOX.9")
+        router = ipc._subscriptions[f"{ipc.priv_root}.session.{token}.>"].callback
+        router(f"{ipc.priv_root}.session.{token}.commands.nope", {}, "_INBOX.9")
         assert sent[-1][0] == "_INBOX.9"
         assert sent[-1][1]["status"] == "error"
         assert sent[-1][1]["code"] == "unknown"
@@ -162,16 +168,16 @@ class TestRouting:
         ipc, sent = _make_ipc()
         ipc.register_action("meta.actions", lambda s, d, r: None)  # untrusted
         token = ipc.mint_session_channel("appA")
-        router = ipc._subscriptions[f"als.test.session.{token}.>"].callback
-        router(f"als.test.session.{token}.meta.actions", {}, "_INBOX.2")
+        router = ipc._subscriptions[f"{ipc.priv_root}.session.{token}.>"].callback
+        router(f"{ipc.priv_root}.session.{token}.meta.actions", {}, "_INBOX.2")
         assert sent[-1][1]["code"] == "unknown"
 
     def test_version_mismatch_rejected(self):
         ipc, sent = _make_ipc()
         ipc.register_action("commands.t.d", lambda s, d, r: None, trusted=True, main_thread=False)
         token = ipc.mint_session_channel("appA")
-        router = ipc._subscriptions[f"als.test.session.{token}.>"].callback
-        router(f"als.test.session.{token}.commands.t.d", {"contract_version": 2}, "_INBOX.3")
+        router = ipc._subscriptions[f"{ipc.priv_root}.session.{token}.>"].callback
+        router(f"{ipc.priv_root}.session.{token}.commands.t.d", {"contract_version": 2}, "_INBOX.3")
         assert sent[-1][1]["code"] == "version_mismatch"
 
 
@@ -204,8 +210,8 @@ class TestTeardown:
         t2 = ipc.mint_session_channel("b")
         ipc.teardown_session_channels()
         assert ipc.session_channel_count == 0
-        assert f"als.test.session.{t1}.>" not in ipc._subscriptions
-        assert f"als.test.session.{t2}.>" not in ipc._subscriptions
+        assert f"{ipc.priv_root}.session.{t1}.>" not in ipc._subscriptions
+        assert f"{ipc.priv_root}.session.{t2}.>" not in ipc._subscriptions
 
     def test_teardown_single_app(self):
         ipc, _ = _make_ipc()
@@ -213,8 +219,8 @@ class TestTeardown:
         tb = ipc.mint_session_channel("b")
         ipc.teardown_session_channels("a")
         assert ipc.session_channel_count == 1
-        assert f"als.test.session.{ta}.>" not in ipc._subscriptions
-        assert f"als.test.session.{tb}.>" in ipc._subscriptions
+        assert f"{ipc.priv_root}.session.{ta}.>" not in ipc._subscriptions
+        assert f"{ipc.priv_root}.session.{tb}.>" in ipc._subscriptions
 
     def test_dead_token_routes_nowhere(self):
         ipc, sent = _make_ipc()
@@ -223,9 +229,9 @@ class TestTeardown:
             "commands.t.d", lambda s, d, r: seen.append(d), trusted=True, main_thread=False
         )
         token = ipc.mint_session_channel("a")
-        router = ipc._subscriptions[f"als.test.session.{token}.>"].callback
+        router = ipc._subscriptions[f"{ipc.priv_root}.session.{token}.>"].callback
         ipc.teardown_session_channels()
-        router(f"als.test.session.{token}.commands.t.d", {}, "_INBOX.5")
+        router(f"{ipc.priv_root}.session.{token}.commands.t.d", {}, "_INBOX.5")
         assert seen == []
         assert sent[-1][1]["code"] == "denied"
 
@@ -241,9 +247,36 @@ class TestAuthResponse:
         assert resp["contract_version"] == 1
         assert resp["tiled_url"] == "http://t"
         token = resp["session_token"]
-        assert f"als.test.session.{token}.>" in ipc._subscriptions
+        assert resp["session_subject"] == f"{ipc.priv_root}.session.{token}"
+        assert f"{ipc.priv_root}.session.{token}.>" in ipc._subscriptions
 
     def test_denied_response_has_no_token(self):
         ipc, _ = _make_ipc()
         resp = ipc.build_auth_response(approved=False, reason="denied")
         assert resp == {"status": "denied", "reason": "denied", "contract_version": 1}
+
+
+class TestPrivateRoot:
+    def test_meta_actions_advertises_priv_root(self):
+        ipc, sent = _make_ipc()
+        ipc._handle_meta_actions("als.test.meta.actions", {}, "_INBOX.m")
+        assert sent[-1][1]["priv_root"] == ipc.priv_root
+        assert ipc.priv_root.startswith("_PRIV.")
+
+    def test_meta_events_and_discover_advertise_priv_root(self):
+        ipc, sent = _make_ipc()
+        ipc._handle_meta_events("s", {}, "_INBOX.e")
+        ipc._handle_discover("s", {}, "_INBOX.d")
+        assert sent[-2][1]["priv_root"] == ipc.priv_root
+        assert sent[-1][1]["priv_root"] == ipc.priv_root
+
+    def test_private_action_only_on_priv_root(self):
+        ipc, _ = _make_ipc()
+        ipc.register_action("auth.request", lambda s, d, r: None, private=True)
+        assert ipc.topic("auth.request") not in ipc._subscriptions
+        assert f"{ipc.priv_root}.auth.request" in ipc._subscriptions
+
+    def test_private_and_trusted_exclusive(self):
+        ipc, _ = _make_ipc()
+        with pytest.raises(ValueError):
+            ipc.register_action("x", lambda s, d, r: None, private=True, trusted=True)

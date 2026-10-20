@@ -10,7 +10,6 @@ import asyncio
 import json
 import os
 import platform
-import secrets
 import ssl
 import threading
 from collections.abc import Callable, Mapping
@@ -23,6 +22,7 @@ from loguru import logger
 from nats.aio.client import Client as NatsClient
 from PySide6.QtCore import QObject, Signal
 
+from lightfall_utils.ipc.capability import ConnectionCapability, new_capability, new_token
 from lightfall_utils.ipc.protocol import CONTRACT_VERSION, error_reply
 from lightfall_utils.ipc.trust import TrustManager, TrustState
 from lightfall_utils.threads import initialize_main_thread_invoker, invoke_in_main_thread
@@ -123,6 +123,9 @@ class IPCService(QObject):
         super().__init__(parent)
         self._nats_url = nats_url
         self._topic_prefix = topic_prefix
+        # One capability per instance, reused across reconnects (nats-py reuses
+        # connect options on reconnect), so priv_root is stable for our lifetime.
+        self._capability: ConnectionCapability = new_capability()
 
         self._connected_lock = threading.Lock()
         self._connected: bool = False
@@ -157,6 +160,11 @@ class IPCService(QObject):
     @display_name.setter
     def display_name(self, value: str | None) -> None:
         self._display_name = value
+
+    @property
+    def priv_root(self) -> str:
+        """Private subject root (``_PRIV.<p>``) only this connection may subscribe."""
+        return self._capability.priv_root
 
     @property
     def nats_url(self) -> str:
@@ -194,6 +202,7 @@ class IPCService(QObject):
         schema: dict[str, Any] | None = None,
         main_thread: bool = True,
         trusted: bool = False,
+        private: bool = False,
     ) -> _ActionHandle:
         """Register a request/reply action handler.
 
@@ -210,12 +219,18 @@ class IPCService(QObject):
                 on the bare prefixed subject are rejected with a structured
                 ``denied`` error. The routed payload carries
                 ``data["_identity"] = {"app_name", "session_token"}``.
+            private: If True the action is subscribed on ``{priv_root}.{suffix}``
+                instead of the public prefixed subject, so only a peer that
+                discovered ``priv_root`` can reach it. Mutually exclusive with
+                ``trusted``.
 
         Returns:
             An :class:`_ActionHandle` whose :meth:`~_ActionHandle.unregister`
             method removes both the catalog entry and the subscription.
         """
-        full_subject = self.topic(suffix)
+        if private and trusted:
+            raise ValueError("register_action: 'private' and 'trusted' are mutually exclusive")
+        full_subject = f"{self.priv_root}.{suffix}" if private else self.topic(suffix)
         self._action_catalog[suffix] = ActionInfo(
             subject=suffix, description=description, schema=schema
         )
@@ -277,6 +292,7 @@ class IPCService(QObject):
                     "instance_id": self._instance_id,
                     "display_name": self._display_name,
                     "prefix": self._topic_prefix,
+                    "priv_root": self.priv_root,
                     "actions": self.list_actions(),
                 },
             )
@@ -290,6 +306,7 @@ class IPCService(QObject):
                     "instance_id": self._instance_id,
                     "display_name": self._display_name,
                     "prefix": self._topic_prefix,
+                    "priv_root": self.priv_root,
                     "events": self.list_events(),
                 },
             )
@@ -303,6 +320,7 @@ class IPCService(QObject):
                     "instance_id": self._instance_id,
                     "display_name": self._display_name,
                     "prefix": self._topic_prefix,
+                    "priv_root": self.priv_root,
                     "actions": self.list_actions(),
                 },
             )
@@ -360,7 +378,9 @@ class IPCService(QObject):
             response["status"] = "approved"
             response["contract_version"] = CONTRACT_VERSION
             if app_name:
-                response["session_token"] = self.mint_session_channel(app_name)
+                token = self.mint_session_channel(app_name)
+                response["session_token"] = token
+                response["session_subject"] = f"{self.priv_root}.session.{token}"
             return response
         response = {"status": "denied", "contract_version": CONTRACT_VERSION}
         if reason:
@@ -379,7 +399,7 @@ class IPCService(QObject):
     def mint_session_channel(self, app_name: str) -> str:
         """Mint a capability channel for *app_name* and return its token.
 
-        Subscribes ``{prefix}.session.{token}.>`` and routes requests to
+        Subscribes ``{priv_root}.session.{token}.>`` and routes requests to
         trusted actions with the app identity attached. Possession of the
         token is proof of a completed auth handshake in the current login
         session.
@@ -389,8 +409,8 @@ class IPCService(QObject):
         than leaking old tokens that would continue to work indefinitely.
         """
         self.teardown_session_channels(app_name)
-        token = secrets.token_urlsafe(32)
-        wildcard = self.topic(f"session.{token}.>")
+        token = new_token()
+        wildcard = f"{self.priv_root}.session.{token}.>"
         self._session_channels[token] = _SessionChannel(
             token=token, app_name=app_name, wildcard_subject=wildcard
         )
@@ -418,7 +438,7 @@ class IPCService(QObject):
         validates it, attaches identity, and dispatches honoring the target
         action's ``main_thread`` preference.
         """
-        session_prefix = self.topic("session.")
+        session_prefix = f"{self.priv_root}.session."
         remainder = subject[len(session_prefix) :] if subject.startswith(session_prefix) else ""
         token, _, action_suffix = remainder.partition(".")
 
@@ -743,6 +763,7 @@ class IPCService(QObject):
             tls_ctx = ssl.create_default_context()
             self._nc = await nats.connect(
                 self._nats_url,
+                **self._capability.connect_kwargs(),
                 tls=tls_ctx,
                 error_cb=self._error_cb,
                 disconnected_cb=self._disconnected_cb,
@@ -871,6 +892,8 @@ class IPCService(QObject):
                 "IPCService: NATS {} (further reconnect errors suppressed until reconnect)",
                 msg,
             )
+        elif "permissions violation" in msg.lower():
+            logger.warning("IPCService: NATS permissions violation: {}", msg)
         elif isinstance(exc, nats.errors.SlowConsumerError):
             logger.warning("IPCService: NATS {}", msg)
         else:
