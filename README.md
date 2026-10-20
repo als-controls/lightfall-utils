@@ -9,7 +9,7 @@ Extracted from [Lightfall](https://github.com/als-controls/lightfall). Modules:
 - `lightfall_utils.qt_affinity` — GUI-thread assertion helpers (`gui_thread_only`)
 - `lightfall_utils.config` — priority-layered YAML config with pydantic validation
 - `lightfall_utils.theming` — semantic design tokens, theme registry/manager, QSS generation
-- `lightfall_utils.ipc` — NATS-backed `IPCService` with a trust handshake, per-session capability channels, discovery and a structured reply protocol; optional `LocalNatsServer` for broker-less development (`pip install lightfall-utils[local-nats]`).
+- `lightfall_utils.ipc` — NATS-backed `IPCService` with a trust handshake, per-session capability channels, discovery and a structured reply protocol; optional `LocalNatsServer` for broker-less development (`pip install lightfall-utils[local-nats]`). `lightfall_utils.ipc.capability` (stdlib only) holds the connection-capability helpers that bcgnats requires of every client: a secret connect token plus a matching `_INBOX.<p>` inbox prefix (see Lightfall's *NATS Use Model* developer-guide page and `docs/ipc.md`).
 - `lightfall_utils.ca` — caproto → Qt signal bridge (`SharedContext`, `PV`); requires the `ca` extra
 - `lightfall_utils.caproto_shutdown` — drains caproto's user-callback thread pools cleanly at application shutdown
 

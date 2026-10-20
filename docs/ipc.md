@@ -6,23 +6,66 @@ The `lightfall_utils.ipc` module provides a Qt-integrated IPC service built on N
 
 An `IPCService` manages a connection to a NATS broker, publishes and subscribes to a topic tree, handles request/reply patterns for actions, and mints per-session capability tokens for trusted applications. The protocol uses JSON and versioning to ensure compatibility across services.
 
+## Connection Capability
+
+Every `IPCService` connects with a per-instance **connection capability** from
+`lightfall_utils.ipc.capability`: a random secret sent as the NATS connect `token`, and the
+matching `inbox_prefix="_INBOX.<p>"`, where
+`p = base32(sha256("lightfall-nats-v1:" + secret))`, lowercase, unpadded, first 26 characters.
+On bcgnats the broker's auth callout derives the same `p` and lets the connection subscribe only to
+`_INBOX.<p>.>`, its **private root** `_PRIV.<p>.>`, and the allow-listed public roots. The
+reference model is Lightfall's developer-guide page *NATS Use Model*
+(`lightfall/docs/developer-guide/nats-use-model.md`).
+
+The capability is created once per `IPCService` and reused across reconnects, so
+`service.priv_root` (`_PRIV.<p>`) is stable for the service's lifetime.
+
+`lightfall_utils.ipc.capability` is **stdlib only**, so it can be used by clients that don't run Qt:
+
+```python
+import nats
+from lightfall_utils.ipc.capability import new_capability, private_auth_request
+
+cap = new_capability()            # .secret, .prefix, .inbox_prefix, .priv_root
+nc = await nats.connect(url, **cap.connect_kwargs())   # {"token": ..., "inbox_prefix": ...}
+
+# Discover priv_root via {prefix}.meta.actions, then request {priv_root}.auth.request
+reply = await private_auth_request(nc, "als.7011", {"app_name": "my-tool", "app_version": "1.0"})
+session_subject = reply["session_subject"]   # send commands to f"{session_subject}.<action>"
+```
+
+| Name | Purpose |
+|---|---|
+| `new_capability()` | Fresh `ConnectionCapability(secret, prefix)` with `inbox_prefix`, `priv_root`, `connect_kwargs()` |
+| `derive_prefix(secret)` | The secret → `p` derivation the callout uses |
+| `new_token()` | 32 random bytes, URL-safe (43 chars); used for secrets, session and delivery tokens |
+| `private_auth_request(nc, topic_prefix, payload, timeout=5.0)` | Two-step private handshake; returns the decoded reply |
+| `PrivateRootUnavailable` | Raised when `meta.actions` has no `priv_root` (a pre-callout peer) |
+| `VENDORED_FROM` | Version marker checked by vendored copies |
+
+**Vendoring rule.** Importing `lightfall_utils.ipc` pulls in PySide6, so headless repositories copy
+`capability.py` **byte-for-byte** as `nats_capability.py` and pin it with a test that checks known
+`derive_prefix` vectors and `VENDORED_FROM`. Keep `capability.py` free of Qt, Lightfall and
+third-party imports, and change it only here, then re-copy it everywhere.
+
 ## Topic Structure
 
-All user-visible subjects live under a configurable prefix (e.g., `"als.lightfall"`). Well-known discovery uses no prefix:
+Public subjects live under a configurable prefix (e.g., `"als.lightfall"`). Well-known discovery
+uses no prefix. Private subjects live under the instance's private root `_PRIV.<p>`:
 
-- **Auth handshake:** `{prefix}.auth.request` — app sends `{"app_name", "version"}`, service replies with approval/denial and session token
-- **Meta discovery (no auth required):** `{prefix}.meta.actions` — list registered actions; `{prefix}.meta.events` — list registered events
-- **Peer discovery (no prefix):** `_lightfall.discover` — scatter-gather request/reply to find all live services
-- **Session capability channels:** `{prefix}.session.{token}.>` — per-app capability subject after successful auth; routes to trusted actions with identity attached
+- **Meta discovery (no auth required):** `{prefix}.meta.actions` — list registered actions; `{prefix}.meta.events` — list registered events. Both replies carry `priv_root`
+- **Peer discovery (no prefix):** `_lightfall.discover` — scatter-gather request/reply to find all live services; replies carry `priv_root`
+- **Auth handshake (private):** `{priv_root}.auth.request` when registered with `private=True` (as Lightfall does) — app sends `{"app_name", "app_version"}`, service replies with approval/denial, `session_token` and `session_subject`
+- **Session capability channels:** `{priv_root}.session.{token}.>` — per-app capability subject after successful auth; routes to trusted actions with identity attached
 
 ## Trust Handshake Sequence
 
-1. App sends a request to `{prefix}.auth.request` with `{"app_name", "version"}` and a reply subject
+1. App discovers `priv_root` (from `meta.actions` or `_lightfall.discover`) and sends a request to `{priv_root}.auth.request` with `{"app_name", "app_version"}`; the reply goes to its own `_INBOX.<p>`
 2. Service evaluates trust via `evaluate_trust(app_name)` (delegates to a configured `TrustManager`)
    - If `UNKNOWN`, the service may prompt the user with a `TrustDialog`
    - If `DENIED`, reply with `{"status": "denied", ...}`
-   - If `APPROVED`, mint a session capability channel token and reply with `{"status": "approved", "session_token": "...", ...}`
-3. App uses the session token in requests to trusted actions: sends on `{prefix}.session.{token}.action_name` instead of the bare `{prefix}.action_name`
+   - If `APPROVED`, mint a session capability channel token and reply with `{"status": "approved", "session_token": "...", "session_subject": "_PRIV.<p>.session.<token>", ...}`
+3. App sends requests for trusted actions to `{session_subject}.action_name` instead of the bare `{prefix}.action_name` (which answers `denied`)
 4. Service attaches identity to the request: `data["_identity"] = {"app_name", "session_token"}`
 
 When an app re-authenticates, existing tokens for that app are revoked.
@@ -75,8 +118,23 @@ Pass `trusted=True` to `register_action()` to make an action reachable only
 through a session capability channel (see "Trust Handshake Sequence" above).
 A request sent to its bare, non-session subject gets a structured `denied`
 error reply instead of reaching the handler; the request must instead be
-sent to `{prefix}.session.{token}.<suffix>` with a token obtained from a
-completed `auth.request` handshake.
+sent to `{priv_root}.session.{token}.<suffix>` (the `session_subject` from a
+completed `auth.request` handshake).
+
+### Private actions
+
+Pass `private=True` to subscribe an action on the service's private root,
+`{priv_root}.{suffix}`, instead of `{prefix}.{suffix}`. On bcgnats only this
+connection can subscribe there, so only it receives the request and only it
+can answer. Use it for pre-handshake endpoints whose payloads must stay private,
+above all `auth.request`:
+
+```python
+service.register_action("auth.request", handle_auth, private=True)
+# subscribed at f"{service.priv_root}.auth.request"
+```
+
+`private` and `trusted` are mutually exclusive (`ValueError`).
 
 ## Building Auth Responses
 
@@ -89,7 +147,8 @@ response = service.build_auth_response(
     app_name="remote-app",
     extra={"session_id": "s-12345"},
 )
-# Returns: {"status": "approved", "session_token": "...", "session_id": "s-12345", ...}
+# Returns: {"status": "approved", "session_token": "...",
+#           "session_subject": "_PRIV.<p>.session.<token>", "session_id": "s-12345", ...}
 
 # Denied
 response = service.build_auth_response(
@@ -171,6 +230,9 @@ server.stop()
 ```
 
 Requires `pip install lightfall-utils[local-nats]`.
+
+The local broker listens on 127.0.0.1 and has no auth callout: everything on the host is trusted.
+`IPCService` still sends its token and inbox prefix, which a plain `nats-server` ignores.
 
 ## Trust Management
 
