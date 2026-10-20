@@ -9,12 +9,22 @@ from typing import Literal
 from lightfall_utils.ipc.services.protocol import sanitize_token
 
 _CONTRACT_RE = re.compile(r"^\d+\.\d+\Z")
-_FORBIDDEN_ROOTS = {"", "_INBOX", "_PRIV"}
+_FORBIDDEN_ROOTS = {"_INBOX", "_PRIV"}
+_BAD_TOKEN_CHARS = re.compile(r"[*>\s]")
 
 
 def _check_scope(scope: str) -> None:
-    if scope.split(".", 1)[0] in _FORBIDDEN_ROOTS:
-        raise ValueError(f"invalid scope {scope!r}: first token must not be empty, _INBOX or _PRIV")
+    """Every dot-separated token must be a non-empty literal subject token (no ``*``, ``>``
+    or whitespace), and the first must not be ``_INBOX`` or ``_PRIV``."""
+    tokens = scope.split(".")
+    for tok in tokens:
+        if not tok or _BAD_TOKEN_CHARS.search(tok):
+            raise ValueError(
+                f"invalid scope {scope!r}: every token must be non-empty, without '*', '>' "
+                "or whitespace"
+            )
+    if tokens[0] in _FORBIDDEN_ROOTS:
+        raise ValueError(f"invalid scope {scope!r}: first token must not be _INBOX or _PRIV")
 
 
 @dataclass(frozen=True)

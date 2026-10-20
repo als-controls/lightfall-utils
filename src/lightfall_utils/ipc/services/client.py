@@ -12,6 +12,21 @@ handshake.  ``incompatible`` and ``unauthorized`` are terminal for the current i
 new ``instance_id`` on the heartbeat starts over (fresh ``meta.info``, fresh delivery token,
 new handshake) and fires ``on_restarted`` if a previous instance was known.
 
+While a launcher has just started the service (:meth:`ServiceClient.expect_launch`), a
+missing responder keeps health at ``starting`` (the spec's "launched, no heartbeat yet")
+instead of ``down``, until the first instance is seen.
+
+Session resets: if the lease is lost on the *same* instance (pings time out repeatedly, or
+no ping succeeded for longer than ``LEASE_S``), the client re-handshakes and, once the new
+session is up, fires ``on_session_reset(dropped_stream_ids)``.  Both ``on_restarted`` and
+``on_session_reset`` mean "the service no longer knows your session state": streams are gone
+(:meth:`ServiceClient.send_chunk` raises :class:`StreamClosedError` for them) and consumers
+must resync (e.g. re-push config).  A single slow ping is tolerated.
+
+``on_info(info)`` fires when the service-reported ``state`` or ``summary`` changes (from
+``meta.info`` or a heartbeat).  ``on_public_event(name, cb)`` receives the public broadcasts
+``{root}.events.<name>`` (forgeable; never act on them in ways a forgery could abuse).
+
 Timing uses the injectable ``clock``; a background loop calls :meth:`tick` every
 ``POLL_S`` real seconds, and tests may call :meth:`tick` directly after advancing a fake
 clock.
@@ -26,6 +41,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from nats.errors import Error as NatsError
 from nats.errors import NoRespondersError
 
 from lightfall_utils.ipc.capability import _PRIV_ROOT_RE, PrivateNoResponders, new_token
@@ -44,6 +60,11 @@ _STREAM_PREFIX = "stream."
 # Backoff (clock seconds) between connect attempts after a failure on a live instance.
 _RETRY_BACKOFF_S = (1.0, 2.0, 5.0, 10.0)
 _TERMINAL = frozenset({"incompatible", "unauthorized"})
+# Lease-loss detection: re-handshake after this many consecutive ping timeouts, or once no
+# ping has succeeded for LEASE_S - PING_S (the service would expire the lease soon after).
+_PING_FAILS_BEFORE_RESET = 3
+_RESET_AFTER_S = P.LEASE_S - P.PING_S
+_EVENTS_INFIX = ".events."
 
 
 class ServiceCallError(RuntimeError):
@@ -52,6 +73,11 @@ class ServiceCallError(RuntimeError):
     def __init__(self, reply: dict) -> None:
         super().__init__(f"{reply.get('code')}: {reply.get('message')}")
         self.reply = reply
+
+
+class StreamClosedError(RuntimeError):
+    """The stream id is not open on this client (never opened or adopted, already finished,
+    or lost in a session reset / service restart)."""
 
 
 def _bad_token(tok: Any) -> bool:
@@ -90,7 +116,10 @@ class ServiceClient:
         self._state_cbs: list[Callable[[str], Any]] = []
         self._restart_cbs: list[Callable[[], Any]] = []
         self._event_cbs: dict[str, list[Callable[[dict], Any]]] = {}
+        self._public_cbs: dict[str, list[Callable[[dict], Any]]] = {}
         self._stream_cbs: list[Callable[[str, int, bytes, bool], Any]] = []
+        self._reset_cbs: list[Callable[[list[str]], Any]] = []
+        self._info_cbs: list[Callable[[dict], Any]] = []
 
         self._instance_id: str | None = None
         self._retired: set[str] = set()
@@ -98,9 +127,16 @@ class ServiceClient:
         self._delivery_root: str | None = None
         self._delivery_sub: Any = None
         self._hb_sub: Any = None
-        self._streams: dict[str, str] = {}  # stream_id -> kind
+        self._events_sub: Any = None
+        self._streams: dict[str, str | None] = {}  # stream_id -> kind (None: unknown)
         self._last_beat = 0.0
         self._last_ping = 0.0
+        self._last_ok = 0.0  # last handshake or successful ping
+        self._ping_fails = 0
+        self._launching = False
+        # (instance_id, dropped stream ids) of a session lost on its instance, until the
+        # replacement handshake succeeds
+        self._reset_pending: tuple[str | None, list[str]] | None = None
         self._ping_task: asyncio.Task | None = None
         self._connect_task: asyncio.Task | None = None
         self._connect_lock = asyncio.Lock()
@@ -124,6 +160,18 @@ class ServiceClient:
     def on_stream(self, cb: Callable[[str, int, bytes, bool], Any]) -> None:
         self._stream_cbs.append(cb)
 
+    def on_session_reset(self, cb: Callable[[list[str]], Any]) -> None:
+        """``cb(dropped_stream_ids)`` after a lost session was replaced on the same instance."""
+        self._reset_cbs.append(cb)
+
+    def on_info(self, cb: Callable[[dict], Any]) -> None:
+        """``cb(info)`` whenever the service-reported ``state`` or ``summary`` changes."""
+        self._info_cbs.append(cb)
+
+    def on_public_event(self, name: str, cb: Callable[[dict], Any]) -> None:
+        """``cb(event)`` for public broadcasts on ``{root}.events.<name>``."""
+        self._public_cbs.setdefault(name, []).append(cb)
+
     @staticmethod
     def _fire(cbs: list, *args: Any) -> None:
         for cb in list(cbs):
@@ -138,6 +186,21 @@ class ServiceClient:
         if health != self.health:
             self.health = health
             self._fire(self._state_cbs, health)
+
+    def _set_info(self, info: dict) -> None:
+        old = self.info or {}
+        self.info = info
+        if (old.get("state"), old.get("summary")) != (info.get("state"), info.get("summary")):
+            self._fire(self._info_cbs, dict(info))
+
+    def expect_launch(self) -> None:
+        """A launcher has just (re)started the service process: report ``starting`` (not
+        ``down``) while nothing answers, until an instance is seen."""
+        self._launching = True
+        self._retry_at = 0.0
+        self._failures = 0
+        if self.health not in ("unknown", "starting") and self._session_subject is None:
+            self._set_health("starting")
 
     # -- properties ---------------------------------------------------------------------
 
@@ -170,6 +233,9 @@ class ServiceClient:
         self._closed = False
         self._set_health("starting")
         self._hb_sub = await self._core.subscribe(P.heartbeat(self._root), self._on_beat)
+        self._events_sub = await self._core.subscribe(
+            f"{self._root}.events.>", self._on_public_event
+        )
         await self._core.flush()
         # Run the first connect as the connect task, so beats arriving meanwhile don't start
         # a second one.
@@ -196,13 +262,13 @@ class ServiceClient:
             except Exception as e:
                 log.debug("session.close failed: %s", e)
         self._session_subject = None
-        for sub in (self._delivery_sub, self._hb_sub):
+        for sub in (self._delivery_sub, self._hb_sub, self._events_sub):
             if sub is not None:
                 try:
                     await sub.unsubscribe()
                 except Exception:
                     log.debug("unsubscribe failed", exc_info=True)
-        self._delivery_sub = self._hb_sub = None
+        self._delivery_sub = self._hb_sub = self._events_sub = None
         self._delivery_root = None
         self._streams.clear()
 
@@ -245,6 +311,7 @@ class ServiceClient:
             # Best effort, in the background: the old instance may be gone or have
             # expired the lease, and the new handshake must not wait for it.
             self._spawn(self._close_session(old))
+            self._reset_pending = (self._instance_id, list(self._streams))
         self._session_subject = None
         self._streams.clear()
         sub, self._delivery_sub = self._delivery_sub, None
@@ -260,7 +327,10 @@ class ServiceClient:
         try:
             info = await self._core.request_public(P.meta_info(self._root), {}, DEFAULT_TIMEOUT_S)
         except (TimeoutError, NoRespondersError) as e:
-            self._set_health("down", f"meta.info: {type(e).__name__}")
+            # Just launched and not answering yet: that is "starting", not "down".
+            self._set_health(
+                "starting" if self._launching else "down", f"meta.info: {type(e).__name__}"
+            )
             return
         except (ValueError, UnicodeDecodeError) as e:
             self._set_health("down", f"meta.info: bad reply ({e})")
@@ -272,8 +342,10 @@ class ServiceClient:
         iid = info.get("instance_id")
         if old is not None and old != iid:
             self._retired.add(old)
+            restarted = True  # e.g. a lease re-handshake that found a new process
         self._instance_id = iid if isinstance(iid, str) else None
-        self.info = info
+        self._launching = False
+        self._set_info(info)
         self._last_beat = self._clock()
 
         proto, contract = info.get("svc_protocol"), info.get("contract")
@@ -335,12 +407,16 @@ class ServiceClient:
             self._set_health("incompatible", f"contract_version {cv!r} in handshake reply")
             return
         self._session_subject = subj
-        self._last_ping = self._clock()
+        self._last_ping = self._last_ok = self._clock()
+        self._ping_fails = 0
         self._last_beat = self._clock()
         self.last_error = ""
         self._set_health("up")
+        pending, self._reset_pending = self._reset_pending, None
         if restarted:
             self._fire(self._restart_cbs)
+        elif pending is not None and pending[0] == self._instance_id:
+            self._fire(self._reset_cbs, pending[1])
 
     # -- heartbeat / monitor ------------------------------------------------------------
 
@@ -356,11 +432,22 @@ class ServiceClient:
             return
         stopping = beat.get("state") == "stopping"
         if iid == self._instance_id:
-            self._last_beat = self._clock()
+            now = self._clock()
+            self._last_beat = now
             if self.info is not None:
-                self.info = {**self.info, **beat}
+                self._set_info({**self.info, **beat})
             if stopping:
                 self._set_health("down", "service stopping")
+                return
+            if (
+                self._session_subject is not None
+                and now - self._last_ok > P.LEASE_S
+                and self._connect_task is None
+            ):
+                # Alive again after a pause longer than the lease (a stall or a sleep): the
+                # service has expired our session, so re-handshake instead of claiming "up".
+                log.info("no successful ping for > %.0fs; re-handshaking", P.LEASE_S)
+                self._connect_task = asyncio.create_task(self._reconnect(False))
                 return
             if self.health in ("degraded", "down") and self._session_subject is not None:
                 self._set_health("up")
@@ -373,14 +460,18 @@ class ServiceClient:
                 # The instance is alive but our last connect attempt failed: retry.
                 self._connect_task = asyncio.create_task(self._reconnect(False, iid))
             return
-        if stopping or self._connect_task is not None or self._clock() < self._retry_at:
+        # A new instance id is new evidence: it is not gated by the retry backoff of the
+        # previous instance's failed attempts.
+        if stopping or self._connect_task is not None:
             return
         restarted = self._instance_id is not None
         self._connect_task = asyncio.create_task(self._reconnect(restarted, iid))
 
     async def _reconnect(self, restarted: bool, iid: str | None = None) -> None:
         try:
-            if self.health not in ("unknown", "starting"):
+            # "starting" only for a new instance; retries on the same instance and lease
+            # re-handshakes keep the current health (no down -> starting -> down flicker).
+            if iid is not None and iid != self._instance_id and self.health != "starting":
                 self._set_health("starting")
             await self._connect(restarted=restarted, iid=iid)
         except asyncio.CancelledError:
@@ -428,16 +519,50 @@ class ServiceClient:
         subj = self._session_subject
         if subj is None:
             return
-        reply = await self.call("session.ping", {})
-        if reply.get("status") == "ok" or self._closed or self._session_subject != subj:
+        try:
+            reply = await self.call("session.ping", {})
+        except Exception:
+            log.exception("session ping failed")
             return
-        if reply.get("code") == "timeout" and self.health in ("up", "degraded"):
-            # Heartbeats are fresh but the session does not answer: the lease was lost.
-            log.info("session ping timed out; re-handshaking")
+        if self._closed or self._session_subject != subj:
+            return
+        if reply.get("status") == "ok":
+            self._last_ok = self._clock()
+            self._ping_fails = 0
+            return
+        if reply.get("code") != "timeout" or self.health not in ("up", "degraded"):
+            return
+        # Heartbeats are fresh but the session does not answer.  One slow reply is not a
+        # lost lease (the service may be busy); repeated timeouts, or no success for most
+        # of the lease, are.
+        self._ping_fails += 1
+        if (
+            self._ping_fails >= _PING_FAILS_BEFORE_RESET
+            or self._clock() - self._last_ok >= _RESET_AFTER_S
+        ):
+            log.info("session pings keep timing out; re-handshaking")
             if self._connect_task is None:
                 self._connect_task = asyncio.create_task(self._reconnect(False))
+        else:
+            log.info("session ping timed out (%d in a row)", self._ping_fails)
 
     # -- delivery -----------------------------------------------------------------------
+
+    async def _on_public_event(self, msg: Any) -> None:
+        prefix = self._root + _EVENTS_INFIX
+        if self._closed or not msg.subject.startswith(prefix):
+            return
+        name = msg.subject[len(prefix) :]
+        cbs = self._public_cbs.get(name)
+        if not cbs:
+            return
+        try:
+            ev = json.loads(msg.data)
+        except (ValueError, UnicodeDecodeError):
+            log.debug("non-JSON public event %r dropped", name)
+            return
+        if isinstance(ev, dict) and ev.get("instance_id") not in self._retired:
+            self._fire(cbs, ev)
 
     async def _on_delivery(self, msg: Any) -> None:
         dr = self._delivery_root
@@ -497,6 +622,8 @@ class ServiceClient:
             return self._error("unknown", f"no responders for {action}")
         except (ValueError, UnicodeDecodeError) as e:
             return self._error("bad_request", f"bad reply to {action}: {e}")
+        except (NatsError, RuntimeError) as e:  # connection closed, buffer full, not connected
+            return self._error("unknown", f"{action} failed: {type(e).__name__}: {e}")
         if not isinstance(reply, dict):
             return self._error("bad_request", f"reply to {action} is not an object")
         return reply
@@ -509,17 +636,39 @@ class ServiceClient:
         self._streams[sid] = kind
         return sid
 
+    def adopt_stream(self, stream_id: str, kind: str | None = None) -> None:
+        """Track a stream the service opened through one of its own rpcs (e.g.
+        ``utterance.start`` returning ``stream_id``), so :meth:`send_chunk` accepts it.
+        Without ``kind`` the chunks carry no ``Svc-Kind`` header."""
+        if _bad_token(stream_id):
+            raise ValueError(f"invalid stream_id {stream_id!r}")
+        if self._session_subject is None:
+            raise RuntimeError(f"no session (health={self.health})")
+        self._streams[stream_id] = kind
+
+    def forget_stream(self, stream_id: str) -> None:
+        """Stop tracking ``stream_id`` locally (e.g. the service ended it); no request."""
+        self._streams.pop(stream_id, None)
+
+    @property
+    def streams(self) -> dict[str, str | None]:
+        """Open client-to-service streams: ``stream_id -> kind`` (None if unknown)."""
+        return dict(self._streams)
+
     async def send_chunk(self, stream_id: str, seq: int, data: bytes, final: bool = False) -> None:
+        """Publish one chunk; raises :class:`StreamClosedError` for a stream id that is not
+        open here (e.g. lost in a session reset or a restart)."""
         subj = self._session_subject
         if subj is None:
             raise RuntimeError(f"no session (health={self.health})")
         if _bad_token(stream_id):
             raise ValueError(f"invalid stream_id {stream_id!r}")
-        headers = {
-            P.HDR_SEQ: str(int(seq)),
-            P.HDR_KIND: self._streams.get(stream_id, ""),
-            P.HDR_FINAL: "1" if final else "0",
-        }
+        if stream_id not in self._streams:
+            raise StreamClosedError(f"stream {stream_id[:6]}… is not open")
+        headers = {P.HDR_SEQ: str(int(seq)), P.HDR_FINAL: "1" if final else "0"}
+        kind = self._streams[stream_id]
+        if kind:
+            headers[P.HDR_KIND] = kind
         await self._core.publish(P.stream_subject(subj, stream_id), bytes(data), headers)
         if final:
             self._streams.pop(stream_id, None)

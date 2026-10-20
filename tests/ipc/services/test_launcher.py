@@ -245,3 +245,30 @@ def test_exits_outside_window_do_not_count(tmp_path):
         await la.stop(None)
 
     asyncio.run(main())
+
+
+def test_restart_child_kills_and_respawns(tmp_path):
+    spawns: list[int] = []
+    exits: list[int] = []
+
+    async def main():
+        la = LocalLauncher(
+            _py("import sys; sys.stdin.read()"),  # alive until stdin closes (a hung child)
+            session_token="t",
+            log_path=tmp_path / "log.txt",
+            sleep=_noop_sleep,
+        )
+        la.on_spawn(lambda: spawns.append(1))
+        la.on_exit(exits.append)
+        await la.start()
+        first = la._proc
+        assert await la.restart_child("heartbeats stopped")
+        assert await _wait_for(lambda: len(spawns) == 2 and la.state == "running")
+        second = la._proc
+        assert second is not first and first.returncode is not None
+        assert any("heartbeats stopped" in line for line in la.last_stderr)
+        await la.stop(None)
+        assert not await la.restart_child()  # nothing running
+
+    asyncio.run(main())
+    assert len(exits) == 1

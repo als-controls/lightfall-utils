@@ -19,7 +19,7 @@ def test_publish_bytes_with_headers_roundtrip(broker_url):
             got.set_result((msg.data, dict(msg.headers or {})))
 
         await b.subscribe("t.hdr", cb)
-        await b._nc.flush()
+        await b.flush()
         await a.publish("t.hdr", b"\x00\x01bin", headers={"Svc-Seq": "3", "Svc-Final": "1"})
         out = await asyncio.wait_for(got, 3)
         await a.close()
@@ -68,7 +68,7 @@ def test_request_public_roundtrip(broker_url):
             await b.publish(msg.reply, json.dumps({"ok": True}).encode())
 
         await b.subscribe("t.pub", cb)
-        await b._nc.flush()
+        await b.flush()
         out = await a.request_public("t.pub", {"q": 1})
         await a.close()
         await b.close()
@@ -89,7 +89,7 @@ def test_request_private_roundtrip(broker_url):
             await b.publish(msg.reply, json.dumps({"echo": req["v"]}).encode())
 
         await b.subscribe(subject, cb)
-        await b._nc.flush()
+        await b.flush()
         out = await a.request_private(subject, {"v": 7})
         await a.close()
         await b.close()
@@ -216,3 +216,99 @@ def test_flush_pushes_pending_buffer_before_ping():
     core._nc = FakeNC()
     asyncio.run(core.flush(1.5))
     assert calls == [("pending", True), ("ping", 1.5)]
+
+
+def test_connect_passes_reconnect_limit_and_callbacks(monkeypatch):
+    seen = {}
+    calls = []
+
+    async def fake_connect(url, **kwargs):
+        seen.update(kwargs)
+        return object()
+
+    def bad():
+        calls.append("closed")
+        raise RuntimeError("boom")  # swallowed and logged
+
+    async def reconnected():
+        calls.append("reconnected")
+
+    monkeypatch.setattr(nats, "connect", fake_connect)
+    core = NatsCore(
+        "nats://h:1",
+        max_reconnect_attempts=-1,
+        on_disconnected=lambda: calls.append("disconnected"),
+        on_reconnected=reconnected,
+        on_closed=bad,
+    )
+
+    async def go():
+        await core.connect()
+        for key in ("disconnected_cb", "reconnected_cb", "closed_cb"):
+            await seen[key]()
+
+    asyncio.run(go())
+    assert seen["max_reconnect_attempts"] == -1
+    assert calls == ["disconnected", "reconnected", "closed"]
+
+
+def test_default_core_keeps_nats_reconnect_default(monkeypatch):
+    seen = {}
+
+    async def fake_connect(url, **kwargs):
+        seen.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(nats, "connect", fake_connect)
+    asyncio.run(NatsCore("nats://h:1").connect())
+    assert seen["max_reconnect_attempts"] == 60
+    assert "closed_cb" not in seen
+
+
+def test_reconnects_after_broker_restart_on_same_port():
+    from lightfall_utils.ipc import LocalNatsServer
+
+    from .conftest import _free_port
+
+    port = _free_port()
+    server = LocalNatsServer(port=port, host="127.0.0.1")
+    server.start(timeout_s=10.0)
+    events: list[str] = []
+
+    async def go():
+        nonlocal server
+        core = NatsCore(
+            f"nats://127.0.0.1:{port}",
+            max_reconnect_attempts=-1,
+            on_disconnected=lambda: events.append("down"),
+            on_reconnected=lambda: events.append("up"),
+        )
+        await core.connect()
+        got = asyncio.Queue()
+
+        async def cb(msg):
+            await got.put(msg.data)
+
+        await core.subscribe("lfcore.restart", cb)
+        await core.flush()
+        server.stop()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 10
+        while "down" not in events and loop.time() < deadline:
+            await asyncio.sleep(0.05)
+        server = LocalNatsServer(port=port, host="127.0.0.1")
+        await asyncio.to_thread(server.start, 10.0)
+        while "up" not in events and loop.time() < deadline + 10:
+            await asyncio.sleep(0.05)
+        connected = core.is_connected
+        await core.publish("lfcore.restart", b"again")  # the subscription was restored
+        data = await asyncio.wait_for(got.get(), 5)
+        await core.close()
+        return connected, data
+
+    try:
+        connected, data = asyncio.run(go())
+    finally:
+        server.stop()
+    assert events[:2] == ["down", "up"]
+    assert connected and data == b"again"

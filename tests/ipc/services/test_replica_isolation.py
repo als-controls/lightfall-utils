@@ -1,6 +1,7 @@
 """Permission-model tests against a running bcgnats-auth-callout replica.
 
-Skipped unless ``BCGNATS_REPLICA_URL`` is set (e.g. ``nats://127.0.0.1:4399``).
+Skipped unless ``BCGNATS_REPLICA_URL`` is set (e.g. ``nats://127.0.0.1:4299`` for
+``go run ./cmd/replica --port 4299`` in ``bcgnats-auth-callout``).
 """
 
 import asyncio

@@ -229,3 +229,85 @@ def test_run_service_unreachable_broker_returns_1(monkeypatch):
     monkeypatch.setattr(cli_mod, "CONNECT_TIMEOUT_S", 1.0)
     host = make_host("lfcli.x", single_instance=False)
     assert run_service(host, ["--nats-url", "nats://127.0.0.1:1"]) == 1
+
+
+class _CoreSpy:
+    """Wraps NatsCore construction in the cli to capture kwargs and the on_closed hook."""
+
+    def __init__(self, monkeypatch):
+        self.kwargs: dict = {}
+        real = cli_mod.NatsCore
+        spy = self
+
+        def make(url, **kw):
+            spy.kwargs = kw
+            return real(url, **kw)
+
+        monkeypatch.setattr(cli_mod, "NatsCore", make)
+
+
+def test_external_service_exits_1_when_broker_connection_closes(broker_url, monkeypatch):
+    spy = _CoreSpy(monkeypatch)
+    host = make_host(_scope(), single_instance=False)
+    orig_start = host.start
+
+    async def start(core):
+        await orig_start(core)
+        # Simulate nats-py giving up on reconnecting: it calls closed_cb.
+        asyncio.get_running_loop().call_later(
+            0.3, lambda: asyncio.ensure_future(core._wrap(spy.kwargs["on_closed"], "closed")())
+        )
+
+    host.start = start
+    t0 = time.monotonic()
+    rc = run_service(host, ["--nats-url", broker_url])
+    assert rc == 1
+    assert time.monotonic() - t0 < 10
+    assert spy.kwargs["max_reconnect_attempts"] == 60
+
+
+def test_local_service_reconnects_forever(broker_url, monkeypatch):
+    import io
+
+    spy = _CoreSpy(monkeypatch)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(new_token() + "\n"))  # EOF right after
+    host = make_host(_scope())
+    rc = run_service(host, ["--nats-url", broker_url, "--token-stdin"])
+    assert rc == 0  # stdin EOF is a clean stop, and our own close is not "broker lost"
+    assert spy.kwargs["max_reconnect_attempts"] == -1
+
+
+def test_local_child_survives_local_broker_restart():
+    from lightfall_utils.ipc import LocalNatsServer
+
+    from .conftest import _free_port
+
+    port = _free_port()
+    url = f"nats://127.0.0.1:{port}"
+    server = LocalNatsServer(port=port, host="127.0.0.1")
+    server.start(timeout_s=10.0)
+    scope = _scope()
+    proc = _spawn(url, scope, "--token-stdin", stdin=subprocess.PIPE)
+    proc.stdin.write(new_token() + "\n")
+    proc.stdin.flush()
+
+    async def ready():
+        c = NatsCore(url)
+        await asyncio.wait_for(c.connect(), 5)
+        try:
+            return await _wait_ready(c, scope)
+        finally:
+            await c.close()
+
+    try:
+        first = asyncio.run(ready())
+        server.stop()
+        time.sleep(1.0)
+        server = LocalNatsServer(port=port, host="127.0.0.1")
+        server.start(timeout_s=10.0)
+        second = asyncio.run(ready())  # the same process answers on the new broker
+        assert proc.poll() is None
+        assert second["instance_id"] == first["instance_id"]
+    finally:
+        _kill(proc)
+        server.stop()

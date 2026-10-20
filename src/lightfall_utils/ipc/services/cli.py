@@ -4,8 +4,14 @@
 ``--log-level``, connects, starts the host and serves until one of: ``rpc.shutdown``,
 SIGTERM, SIGINT (Ctrl-C), or stdin EOF when ``--token-stdin`` is given.
 
-Exit codes: 0 clean shutdown, 1 broker unreachable or startup failure, 2 bad arguments or
-a bad stdin token, 3 another instance already serves the root (single-instance services).
+Exit codes: 0 clean shutdown, 1 broker unreachable or startup failure (or the broker
+connection closed for good), 2 bad arguments or a bad stdin token, 3 another instance already
+serves the root (single-instance services).
+
+Broker loss: a locally launched service (``--token-stdin``) reconnects forever, so it
+survives its host-local broker being restarted (it still exits on stdin EOF).  Any other
+service exits with code 1 when nats-py gives up reconnecting, so its supervisor (systemd)
+can restart it instead of leaving a process that serves nothing.
 """
 
 from __future__ import annotations
@@ -70,7 +76,21 @@ def run_service(host: ServiceHost, argv: list[str] | None = None) -> int:
 
 
 async def _serve(host: ServiceHost, args: argparse.Namespace) -> int:
-    core = NatsCore(args.nats_url, name=f"{host.name}-service")
+    lost = {"closed": False, "stopping": False}
+
+    def on_closed() -> None:
+        if lost["stopping"]:
+            return  # our own close at exit
+        log.error("broker connection closed for good; stopping")
+        lost["closed"] = True
+        host.request_stop()
+
+    core = NatsCore(
+        args.nats_url,
+        name=f"{host.name}-service",
+        max_reconnect_attempts=-1 if args.token_stdin else 60,
+        on_closed=on_closed,
+    )
     try:
         await asyncio.wait_for(core.connect(), CONNECT_TIMEOUT_S)
     except Exception as e:
@@ -84,7 +104,7 @@ async def _serve(host: ServiceHost, args: argparse.Namespace) -> int:
         except InstanceConflictError as e:
             print(f"error: {e}", file=sys.stderr)
             return EXIT_CONFLICT
-        if host.state == "starting":
+        if host.state == "starting" and host.auto_ready:
             host.state = "ready"
         log.info("%s serving %s (instance %s)", host.name, host.root, host.instance_id)
         restore = _install_signal_handlers(loop, host)
@@ -94,10 +114,11 @@ async def _serve(host: ServiceHost, args: argparse.Namespace) -> int:
             ).start()
         await host.serve_forever()
         log.info("%s stopped", host.name)
-        return EXIT_OK
+        return EXIT_FAILED if lost["closed"] else EXIT_OK
     finally:
         restore()
         await host.stop()
+        lost["stopping"] = True
         await core.close()
 
 

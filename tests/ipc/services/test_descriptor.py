@@ -70,3 +70,23 @@ def test_resolved_scope():
 def test_resolved_scope_sanitizes_hostname():
     d = _mk()
     assert d.resolved_scope("als", "My_Host.lbl.gov", "ab") == "als.host.my_host-lbl-gov.ab"
+
+
+@pytest.mark.parametrize(
+    "scope", ["x.*", "x.>", "x..y", "x.", "x.a b", "x.{prefix}*", "*.x", ">", "x.\ty"]
+)
+def test_every_scope_token_validated(scope):
+    with pytest.raises(ValueError):
+        _mk(scope=scope, launch="external", command=())
+
+
+@pytest.mark.parametrize("prefix", ["als.*", "als.>", "als..7011", "als.", "a b", "als.\n"])
+def test_wildcard_or_empty_tokens_in_prefix_rejected(prefix):
+    d = _mk(scope="{prefix}.x", launch="external", command=())
+    with pytest.raises(ValueError):
+        d.resolved_scope(prefix, "h", "ab12")
+
+
+def test_multi_token_prefix_accepted():
+    d = _mk(scope="{prefix}.x", launch="external", command=())
+    assert d.resolved_scope("als.7011", "h", "ab12") == "als.7011.x"

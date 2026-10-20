@@ -12,10 +12,21 @@ re-emitted as Qt signals on the main thread via
   health stays ``down``, the signal is re-emitted (same value) whenever ``last_error``
   changes, so a UI can refresh the reason.
 - ``restarted()``: the service came back as a new instance and the session was redone.
+- ``session_reset(list)``: the session was lost on the *same* instance (e.g. a stall longer
+  than the lease) and redone; the argument lists the client-to-service stream ids that were
+  dropped.  Like ``restarted``, it means "resync": re-push config, abandon open streams.
+- ``info_changed(dict)``: the service-reported ``state`` or ``summary`` changed (from
+  ``meta.info`` or a heartbeat), e.g. ``summary`` going ``loading`` -> ``ready``.  ``info``
+  is the latest merged info.
 - ``event(str, dict)``: a per-session event.  Only names registered with
   :meth:`QtServiceClient.watch_event` are delivered (before or after :meth:`start`).
+- ``public_event(str, dict)``: a public broadcast ``{root}.events.<name>`` for names
+  registered with :meth:`QtServiceClient.watch_public_event`.  Forgeable: display only.
 - ``stream_chunk(str, int, object, bool)``: a service-to-client stream chunk
   ``(stream_id, seq, data: bytes, final)``.
+- ``connection_changed(bool)``: the broker connection dropped (False) or came back (True).
+  The connection reconnects forever (``max_reconnect_attempts=-1``); the
+  :class:`ServiceManager` uses this signal to restart a dead host-local broker.
 
 ``scope`` is the *resolved* scope (e.g. ``descriptor.resolved_scope(prefix, hostname,
 client_instance)``); ``descriptor.scope`` is only the template and is not used for subjects.
@@ -35,6 +46,12 @@ which receives the session token the adapter mints with ``capability.new_token()
 and then the client with that same token; :meth:`stop` runs
 ``launcher.stop(shutdown=<rpc.shutdown>)``.  If the launcher gives up (too many crashes),
 health goes ``down`` and ``last_error`` carries the last stderr lines.
+
+Local supervision: while the launcher is starting a child and no instance has answered yet,
+health is ``starting`` (not ``down``).  If a child that had been ``up`` stays ``down`` for
+``hung_restart_s`` while its process is still running and the broker connection is up (it
+stopped heartbeating, e.g. a hung event loop), the adapter kills it with
+:meth:`LocalLauncher.restart_child` and the launcher restarts it with backoff.
 """
 
 from __future__ import annotations
@@ -65,6 +82,8 @@ STOP_TIMEOUT_S = 15.0
 # Backoff (s) between broker connect attempts; retried until stop().
 _CONNECT_BACKOFF_S = (1.0, 2.0, 5.0, 10.0)
 _STDERR_TAIL = 5
+HUNG_RESTART_S = 10.0  # a launched child that was up and stays down this long is restarted
+_WATCHDOG_POLL_S = 0.5
 
 LauncherArg = LocalLauncher | Callable[[str], LocalLauncher] | None
 
@@ -72,8 +91,12 @@ LauncherArg = LocalLauncher | Callable[[str], LocalLauncher] | None
 class QtServiceClient(QObject):
     state_changed = Signal(str)
     restarted = Signal()
+    session_reset = Signal(list)
+    info_changed = Signal(dict)
     event = Signal(str, dict)
+    public_event = Signal(str, dict)
     stream_chunk = Signal(str, int, object, bool)
+    connection_changed = Signal(bool)
 
     def __init__(
         self,
@@ -87,9 +110,11 @@ class QtServiceClient(QObject):
         session_token: str | None = None,
         user: str | None = None,
         tls: ssl.SSLContext | None = None,
+        hung_restart_s: float = HUNG_RESTART_S,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
+        self._hung_restart_s = hung_restart_s
         self.descriptor = descriptor
         self.url = url
         self.scope = scope
@@ -115,9 +140,14 @@ class QtServiceClient(QObject):
         # main-thread mirrors
         self._health = "unknown"
         self._last_error = ""
+        self._broker_connected = False
 
         self._event_names: set[str] = set()  # main thread
         self._registered: set[str] = set()  # loop thread
+        self._public_names: set[str] = set()  # main thread
+        self._public_registered: set[str] = set()  # loop thread
+        self._watchdog_task: asyncio.Task | None = None
+        self._seen_up = False  # loop thread: the current child has been up
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._ready: asyncio.Event | None = None
@@ -150,6 +180,11 @@ class QtServiceClient(QObject):
         c = self._client
         return c.info if c is not None else None
 
+    @property
+    def broker_connected(self) -> bool:
+        """Main-thread mirror of the broker connection (see ``connection_changed``)."""
+        return self._broker_connected
+
     # -- main-thread emitters (guarded: the QObject may be gone by the time they run) ---
 
     def _apply_state(self, health: str, error: str | None) -> None:
@@ -165,6 +200,25 @@ class QtServiceClient(QObject):
     def _emit_restarted(self) -> None:
         with contextlib.suppress(RuntimeError):
             self.restarted.emit()
+
+    def _emit_reset(self, dropped: list) -> None:
+        with contextlib.suppress(RuntimeError):
+            self.session_reset.emit(dropped)
+
+    def _emit_info(self, info: dict) -> None:
+        with contextlib.suppress(RuntimeError):
+            self.info_changed.emit(info)
+
+    def _emit_public(self, name: str, payload: dict) -> None:
+        with contextlib.suppress(RuntimeError):
+            self.public_event.emit(name, payload)
+
+    def _apply_connection(self, connected: bool) -> None:
+        if connected == self._broker_connected:
+            return
+        self._broker_connected = connected
+        with contextlib.suppress(RuntimeError):
+            self.connection_changed.emit(connected)
 
     def _emit_event(self, name: str, payload: dict) -> None:
         with contextlib.suppress(RuntimeError):
@@ -205,6 +259,47 @@ class QtServiceClient(QObject):
         self._registered.add(name)
         c.on_event(name, lambda ev, n=name: invoke_in_main_thread(self._emit_event, n, ev))
 
+    def _register_public(self, name: str) -> None:
+        c = self._client
+        if c is None or name in self._public_registered:
+            return
+        self._public_registered.add(name)
+        c.on_public_event(name, lambda ev, n=name: invoke_in_main_thread(self._emit_public, n, ev))
+
+    def _on_spawn(self) -> None:
+        self._seen_up = False
+        c = self._client
+        if c is not None:
+            c.expect_launch()
+
+    async def _watchdog(self) -> None:
+        """Restart a launched child that was up and then stopped heartbeating."""
+        loop = asyncio.get_running_loop()
+        down_since: float | None = None
+        while True:
+            await asyncio.sleep(_WATCHDOG_POLL_S)
+            la, c, core = self._launcher, self._client, self._core
+            if la is None or c is None or core is None:
+                continue
+            if c.health in ("up", "degraded"):
+                self._seen_up = True
+                down_since = None
+                continue
+            if not (
+                c.health == "down" and self._seen_up and la.state == "running" and core.is_connected
+            ):
+                down_since = None
+                continue
+            now = loop.time()
+            if down_since is None:
+                down_since = now
+            elif now - down_since >= self._hung_restart_s:
+                down_since = None
+                self._seen_up = False
+                await la.restart_child(
+                    f"no heartbeat for {self._hung_restart_s:g}s after going down"
+                )
+
     # -- lifecycle ----------------------------------------------------------------------
 
     def watch_event(self, name: str) -> None:
@@ -216,6 +311,16 @@ class QtServiceClient(QObject):
         if loop is not None and not loop.is_closed():
             with contextlib.suppress(RuntimeError):
                 loop.call_soon_threadsafe(self._register_event, name)
+
+    def watch_public_event(self, name: str) -> None:
+        """Deliver the public broadcast ``{root}.events.<name>`` through ``public_event``."""
+        if name in self._public_names:
+            return
+        self._public_names.add(name)
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(self._register_public, name)
 
     def start(self) -> concurrent.futures.Future:
         """Start the loop thread, the launcher (local services) and the client.
@@ -257,7 +362,14 @@ class QtServiceClient(QObject):
         self._start_task = asyncio.current_task()
         assert self._ready is not None
         try:
-            core = NatsCore(self.url, tls=self._tls, name=f"{self.app_name}:{self.descriptor.name}")
+            core = NatsCore(
+                self.url,
+                tls=self._tls,
+                name=f"{self.app_name}:{self.descriptor.name}",
+                max_reconnect_attempts=-1,
+                on_disconnected=lambda: invoke_in_main_thread(self._apply_connection, False),
+                on_reconnected=lambda: invoke_in_main_thread(self._apply_connection, True),
+            )
             client = ServiceClient(
                 self.descriptor,
                 core,
@@ -269,6 +381,10 @@ class QtServiceClient(QObject):
             )
             client.on_state(self._on_client_state)
             client.on_restarted(lambda: invoke_in_main_thread(self._emit_restarted))
+            client.on_session_reset(
+                lambda dropped: invoke_in_main_thread(self._emit_reset, list(dropped))
+            )
+            client.on_info(lambda info: invoke_in_main_thread(self._emit_info, info))
             client.on_stream(
                 lambda sid, seq, data, final: invoke_in_main_thread(
                     self._emit_chunk, sid, seq, data, final
@@ -278,8 +394,12 @@ class QtServiceClient(QObject):
             self._client = client
             for name in list(self._event_names):
                 self._register_event(name)
+            for name in list(self._public_names):
+                self._register_public(name)
             if self._launcher is not None:
                 self._launcher.on_exit(self._on_child_exit)
+                self._launcher.on_spawn(self._on_spawn)
+                client.expect_launch()
                 self._report("starting", None)
                 await self._launcher.start()
             attempt = 0
@@ -288,6 +408,7 @@ class QtServiceClient(QObject):
                     return
                 try:
                     await asyncio.wait_for(core.connect(), CONNECT_TIMEOUT_S)
+                    invoke_in_main_thread(self._apply_connection, True)
                     break
                 except asyncio.CancelledError:
                     raise
@@ -298,6 +419,8 @@ class QtServiceClient(QObject):
                 await asyncio.sleep(_CONNECT_BACKOFF_S[min(attempt, len(_CONNECT_BACKOFF_S) - 1)])
                 attempt += 1
             await client.start()
+            if self._launcher is not None:
+                self._watchdog_task = asyncio.create_task(self._watchdog())
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -307,6 +430,10 @@ class QtServiceClient(QObject):
             self._ready.set()
 
     async def _astop(self) -> None:
+        wd, self._watchdog_task = self._watchdog_task, None
+        if wd is not None:
+            wd.cancel()
+            await asyncio.gather(wd, return_exceptions=True)
         task = self._start_task
         if task is not None and not task.done():
             task.cancel()
@@ -397,6 +524,20 @@ class QtServiceClient(QObject):
     def open_stream(self, kind: str, params: dict | None = None) -> concurrent.futures.Future:
         """Resolves to the new ``stream_id``; raises ``ServiceCallError`` if refused."""
         return self._submit(lambda c: c.open_stream(kind, params))
+
+    def adopt_stream(self, stream_id: str, kind: str | None = None) -> concurrent.futures.Future:
+        """Track a stream the service opened via its own rpc (see ``ServiceClient``)."""
+
+        async def adopt(c: ServiceClient) -> None:
+            c.adopt_stream(stream_id, kind)
+
+        return self._submit(adopt)
+
+    def forget_stream(self, stream_id: str) -> concurrent.futures.Future:
+        async def forget(c: ServiceClient) -> None:
+            c.forget_stream(stream_id)
+
+        return self._submit(forget)
 
     def send_chunk(
         self, stream_id: str, seq: int, data: bytes, final: bool = False

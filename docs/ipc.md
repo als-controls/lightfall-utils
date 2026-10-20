@@ -254,20 +254,28 @@ The local broker listens on 127.0.0.1 and has no auth callout: everything on the
 `lightfall_utils.ipc.services` is a Qt-free asyncio pattern for out-of-process services: a
 `ServiceHost` inside the service, a `ServiceClient` inside the caller (Lightfall wraps it with
 the `ServiceManager`; `lightfall_utils.ipc.services.qt` is the only Qt module). It builds on the
-connection capability above, so every command, event and stream chunk travels on `_PRIV.*`
-subjects. Only discovery, `meta.info` and the heartbeat are public. See the Lightfall
+connection capability above. The handshake, every command, every per-session event and every
+stream chunk travel on `_PRIV.*` subjects. Four kinds of subject are public under the scope's
+root: discovery, `meta.info`, the heartbeat, and `events.<name>` broadcasts. Anyone on the
+broker can read or forge a public subject, so it never carries session data. See the Lightfall
 [NATS use model](https://github.com/als-controls/lightfall/blob/master/docs/developer-guide/nats-use-model.md)
 for the security rationale.
 
-Subjects live under `{scope}.svc.{service}`: `meta.info`, `heartbeat` and `events.<name>` are
-public; the handshake is `{priv_root}.auth.request`; commands are
-`{priv_root}.session.{token}.rpc.<action>`; per-session events go to the client's own
-`{client_priv_root}.d.{delivery_token}.<name>`.
+| Subject | Kind |
+|---|---|
+| `{scope}.svc.{service}.meta.info`, `{scope}.svc.discover` | public request/reply |
+| `{scope}.svc.{service}.heartbeat` | public event (state, summary) |
+| `{scope}.svc.{service}.events.<name>` | public broadcast (`host.publish_event`) |
+| `{priv_root}.auth.request` | private handshake |
+| `{priv_root}.session.{token}.rpc.<action>` | private commands |
+| `{priv_root}.session.{token}.stream.{stream_id}` | private client-to-service chunks |
+| `{client_priv_root}.d.{delivery_token}.<name>` | private per-session events (`host.emit`) |
+| `{client_priv_root}.d.{delivery_token}.stream.{stream_id}` | private service-to-client chunks |
 
 ### Host
 
 ```python
-from lightfall_utils.ipc.services.host import ServiceHost
+from lightfall_utils.ipc.services.host import ServiceError, ServiceHost
 from lightfall_utils.ipc.services.cli import run_service
 
 host = ServiceHost("echo", "lightfall.local", contract="1.0", version="0.1")
@@ -281,7 +289,45 @@ run_service(host)   # python -m ... --scope S --nats-url URL [--token-stdin]
 
 `lightfall_utils.ipc.services.echo` is the reference service (`echo`, `slow`, and a `bytes`
 stream that emits a `stream_total` event). Use `host.emit(session, name, payload)` for
-per-session events and `host.emit_chunk(...)` for binary chunks.
+per-session events. `name` may be dotted, for example `utterance.transcript`, but may not start
+with `stream`. Each event carries `instance_id` and a per-session `seq`. Use
+`host.emit_chunk(...)` for binary chunks and `host.publish_event(name, payload)` for public
+broadcasts.
+
+An rpc handler (sync or async) returns a dict, or raises `ServiceError(code, message)` to
+send a structured error such as `busy`. Any other exception becomes an `unknown` error reply.
+
+Concurrency: rpc handlers run as tasks. Each stream has its own ordered queue and task, so a
+slow stream handler, such as a transcription on the final chunk, never delays another
+session's lease ping or rpc. A `stream.close` is queued behind the chunks published before it,
+and it is answered as soon as the final call is queued.
+
+Streams can be opened by the built-in `rpc.stream.open {kind, params}` or by service code:
+
+```python
+@host.stream("audio", on_open=lambda session, params: None)  # raise ServiceError to refuse
+async def on_audio(session, stream_id, seq, data, final): ...
+
+@host.rpc("utterance.start")
+async def start(session, payload):
+    if busy():
+        raise ServiceError("busy", "an utterance is already active")
+    return {"stream_id": host.open_stream(session, "audio", payload)}
+
+# finalize after pending chunks / discard now
+await host.end_stream(stream_id, final=True)
+await host.end_stream(stream_id)
+
+# once per stream: final | close | cancel | idle | session_end | stop
+host.on_stream_end(lambda session, stream_id, reason: ...)
+```
+
+Startup: let `run_service` start the host first. Load heavy resources (models) in the
+background, and report progress with `host.set_state(state, summary)`, which publishes a
+heartbeat right away. Pass `ServiceHost(auto_ready=False)` to keep `state="starting"` until
+you call `set_state("ready")`. A host with a stdin token, which is what a locally launched
+service has, skips the single-instance probe. Its scope already contains the launching
+client's instance id.
 
 ### Client
 
@@ -296,47 +342,98 @@ desc = ServiceDescriptor(name="echo", scope="lightfall.local", contract="1.0", l
 client = ServiceClient(desc, core, scope="lightfall.local", app_name="me", app_version="1.0")
 client.on_state(print)                 # unknown/starting/up/degraded/down/incompatible/unauthorized
 client.on_event("stream_total", print)
+client.on_info(print)                  # service-reported state/summary changed
+client.on_session_reset(print)         # lease lost on the same instance; dropped stream ids
+client.on_public_event("state", print) # {root}.events.state
 await client.start()
 reply = await client.call("echo", {"x": 1})   # {"status": "ok", "echo": {"x": 1}, ...}
 await client.close()
 ```
 
 The client checks `svc_protocol` (exact) and `contract` (same major, minor at least the
-descriptor's), performs the handshake, then leases the session with a ping every 5 s (the
-service expires a session after 30 s without one). Heartbeats are every 2 s; one missed beat
-is `degraded`, three is `down`.
+descriptor's), performs the handshake, then leases the session with a ping every 5 s. The
+service expires a session after 30 s without one. Heartbeats are every 2 s; one missed beat is
+`degraded`, three is `down`.
+
+Leases and resets: one slow ping is tolerated. The client handshakes again after 3 timed-out
+pings in a row, or after `LEASE_S - PING_S` (25 s) without a successful one. It also handshakes
+again when beats resume after a pause longer than the lease. On the same instance that fires
+`on_session_reset(dropped_stream_ids)`; for a new instance it fires `on_restarted`. Both mean
+"resync": the service no longer knows your streams or settings.
+
+Streams: `open_stream(kind, params)` uses the built-in rpc. A stream opened through a
+service's own rpc must be registered with `adopt_stream(stream_id, kind=None)`; chunks of a
+stream with an unknown kind carry no `Svc-Kind` header. `send_chunk` raises
+`StreamClosedError` for an id that is not open here (never opened or adopted, already finished,
+or lost in a reset or restart). `call()` never raises for transport problems. It returns an
+error dict: `timeout`, or `unknown` for a closed connection or no responders.
+
+After a launcher has started the process, call `client.expect_launch()`. Until the first
+instance answers, a missing responder then reports `starting`, not `down`.
+
+The Qt adapter (`QtServiceClient`) re-emits all of this on the main thread as the signals
+`state_changed`, `restarted`, `session_reset(list)`, `info_changed(dict)`, `event(str, dict)`,
+`public_event(str, dict)`, `stream_chunk` and `connection_changed(bool)`. Register event names
+with `watch_event` / `watch_public_event`.
 
 ### CLI flags
 
-`run_service` accepts `--scope`, `--nats-url`, `--token-stdin` (read the session token from
-one stdin line and exit on stdin EOF; used when Lightfall launches the service) and
-`--log-level`. The service also exits on `rpc.shutdown`, SIGTERM or SIGINT.
+`run_service` accepts `--scope`, `--nats-url`, `--token-stdin` and `--log-level`.
+`--token-stdin` reads the session token from one stdin line and exits on stdin EOF; Lightfall
+uses it when it launches the service. The service also exits on `rpc.shutdown`, SIGTERM or
+SIGINT. With `--token-stdin` the broker connection reconnects forever, so a local child
+survives a restart of its host-local broker. Without it, the process exits with code 1 when
+nats-py gives up reconnecting, so systemd can restart it.
 
 ### Descriptor
 
 `ServiceDescriptor(name, scope, contract, launch, command, stop_with_client, single_instance,
-interpreter_pref, hint)`. `launch` is `"local"` (Lightfall spawns it; `command` omits the
-interpreter, e.g. `("-m", "lightfall_utils.ipc.services.echo")`) or `"external"` (already
-running, reached over the main broker). `scope` may use `{prefix}`, `{hostname}` and
-`{client_instance}`; a local scope is `{prefix}.host.{hostname}.{client_instance}`.
+interpreter_pref, hint)`. `launch` is either `"local"` or `"external"`:
 
-### Local broker
+- `"local"`: Lightfall spawns the service. `command` omits the interpreter, for example
+  `("-m", "lightfall_utils.ipc.services.echo")`.
+- `"external"`: the service is already running, and Lightfall reaches it over the main broker.
+
+`scope` may use `{prefix}`, `{hostname}` and `{client_instance}`. Every resolved token must be
+a non-empty literal subject token (no `*`, `>` or whitespace), and the first token may not be
+`_INBOX` or `_PRIV`. A local scope is `{prefix}.host.{hostname}.{client_instance}`.
+
+### Local broker and supervision
 
 Local services use a private broker on `127.0.0.1:4223` (preference `services_local_port`),
-plain `nats://`, started by each Lightfall if nothing answers on that port. It has no auth
+over plain `nats://`. Each Lightfall starts it if nothing answers on that port. It has no auth
 callout, so everything on the host is trusted. External services go through the main broker
-and its callout, which enforces the isolation described above.
+and its callout. Lightfall's `ServiceManager` adds three kinds of recovery:
+
+- It restarts a local child that crashes, with a 1, 2, 5, 10 s backoff, and gives up after 5
+  exits in 60 s.
+- It kills and restarts a child that had been `up` and then stopped heartbeating while its
+  process kept running.
+- If the local broker goes away, it starts the broker again on the same port. This covers its
+  own broker crashing and another Lightfall's broker exiting. Clients and children reconnect
+  to the new broker by themselves.
 
 ### Security notes
 
 - Every request to a `_PRIV.*` subject uses `capability.private_request`; never `nc.request`.
 - The service refuses an `auth.request` whose `client_priv_root` prefix differs from the one in
   the request's reply subject, so a client cannot redirect deliveries to someone else.
-- Session and delivery tokens are unguessable subject tokens; a spy cannot subscribe to
-  another connection's `_PRIV.<p>.>` and cannot forge a delivery without the token.
-- `tests/ipc/services/test_replica_isolation.py` checks this against the `bcgnats-auth-callout`
-  replica; run it with `BCGNATS_REPLICA_URL=nats://127.0.0.1:4399` (start
-  `replica --port 4399`).
+- Session and delivery tokens are unguessable subject tokens. On bcgnats, the auth callout's
+  per-connection permissions are what stop a spy from subscribing to another connection's
+  `_PRIV.<p>.>`. Public subjects (heartbeat, `meta.info`, `events.*`) are forgeable, and a
+  forged `meta.info` can impersonate a service (an accepted gap until CSM registration).
+- `tests/ipc/services/test_replica_isolation.py` runs against the `bcgnats-auth-callout`
+  replica (`go run ./cmd/replica --port 4299`, then `BCGNATS_REPLICA_URL=nats://127.0.0.1:4299`).
+  It checks two things, and only these:
+  - Subscribing to the service's `_PRIV.<p>.>` from another connection is refused with a
+    permissions violation.
+  - An event published to the client's `_PRIV` with a guessed delivery token does not reach
+    the client's handler, while the genuine one does.
+
+  It does not show that every subject is isolated. It also cannot tell a refused forged
+  publish from one that the client ignored.
+- On the local broker none of this holds: any process on the host can read and publish
+  everything.
 
 ## Trust Management
 

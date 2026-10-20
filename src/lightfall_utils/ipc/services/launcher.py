@@ -3,6 +3,10 @@
 The token is written as one line to the child's stdin and stdin is then kept open; the
 child (see ``cli.run_service --token-stdin``) exits when stdin reaches EOF, so closing it is
 a clean stop signal. Qt-free.
+
+:meth:`LocalLauncher.restart_child` kills a running child that is alive but unhealthy (e.g.
+its heartbeats stopped); the supervisor then treats it like any other exit (backoff, give-up
+count).  ``on_spawn`` callbacks run after every successful spawn.
 """
 
 from __future__ import annotations
@@ -46,6 +50,7 @@ class LocalLauncher:
         self.state: State = "stopped"
         self._stderr: deque[str] = deque(maxlen=_TAIL)
         self._callbacks: list[Callable[[int], None]] = []
+        self._spawn_cbs: list[Callable[[], None]] = []
         self._exits: list[float] = []
         self._proc: asyncio.subprocess.Process | None = None
         self._task: asyncio.Task | None = None
@@ -64,6 +69,21 @@ class LocalLauncher:
 
     def on_exit(self, cb: Callable[[int], None]) -> None:
         self._callbacks.append(cb)
+
+    def on_spawn(self, cb: Callable[[], None]) -> None:
+        """``cb()`` after each child is spawned and has been sent its token."""
+        self._spawn_cbs.append(cb)
+
+    async def restart_child(self, reason: str = "") -> bool:
+        """Kill the running child so the supervisor restarts it (with backoff); False if no
+        child is running."""
+        proc = self._proc
+        if self.state != "running" or self._stopping or proc is None or proc.returncode is not None:
+            return False
+        log.warning("restarting service child pid %s: %s", proc.pid, reason or "requested")
+        self._stderr.append(f"restarted by supervisor: {reason or 'requested'}")
+        await self._kill(proc)
+        return True
 
     async def start(self) -> None:
         if self._task is not None and not self._task.done():
@@ -109,6 +129,11 @@ class LocalLauncher:
         proc.stdin.write(self._token.encode() + b"\n")
         with contextlib.suppress(ConnectionError, OSError):
             await proc.stdin.drain()
+        for cb in list(self._spawn_cbs):
+            try:
+                cb()
+            except Exception:
+                log.exception("on_spawn callback failed")
         return True
 
     @staticmethod

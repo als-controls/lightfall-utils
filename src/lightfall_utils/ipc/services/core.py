@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
 import json
+import logging
 import ssl
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -18,6 +20,9 @@ from lightfall_utils.ipc.capability import (
 from lightfall_utils.ipc.services.protocol import DEFAULT_TIMEOUT_S
 
 _PRIV_PREFIX = "_PRIV."
+log = logging.getLogger(__name__)
+
+ConnCallback = Callable[[], Any]  # sync or async, no arguments
 
 
 class NatsCore:
@@ -30,11 +35,23 @@ class NatsCore:
         capability: ConnectionCapability | None = None,
         tls: ssl.SSLContext | None = None,
         name: str = "",
+        max_reconnect_attempts: int = 60,
+        on_disconnected: ConnCallback | None = None,
+        on_reconnected: ConnCallback | None = None,
+        on_closed: ConnCallback | None = None,
     ) -> None:
+        """``max_reconnect_attempts=-1`` keeps reconnecting forever (nats-py's default is
+        60 attempts 2 s apart, after which the connection closes for good).  The ``on_*``
+        callbacks (sync or async, no arguments) run on the loop when the broker connection
+        drops, comes back, or closes permanently (also after :meth:`close`)."""
         self._url = url
         self._cap = capability or new_capability()
         self._tls = tls
         self._name = name
+        self._max_reconnect = max_reconnect_attempts
+        self._on_disconnected = on_disconnected
+        self._on_reconnected = on_reconnected
+        self._on_closed = on_closed
         self._nc: Any = None
 
     @property
@@ -45,12 +62,41 @@ class NatsCore:
     def priv_root(self) -> str:
         return self._cap.priv_root
 
+    @property
+    def is_connected(self) -> bool:
+        nc = self._nc
+        return nc is not None and bool(getattr(nc, "is_connected", False))
+
+    @staticmethod
+    def _wrap(cb: ConnCallback | None, what: str):
+        if cb is None:
+            return None
+
+        async def run() -> None:
+            try:
+                r = cb()
+                if inspect.isawaitable(r):
+                    await r
+            except Exception:
+                log.exception("NatsCore %s callback failed", what)
+
+        return run
+
     async def connect(self) -> None:
         kwargs: dict[str, Any] = dict(self._cap.connect_kwargs())
         if self._name:
             kwargs["name"] = self._name
         if self._tls is not None:
             kwargs["tls"] = self._tls
+        kwargs["max_reconnect_attempts"] = self._max_reconnect
+        for key, cb, what in (
+            ("disconnected_cb", self._on_disconnected, "disconnected"),
+            ("reconnected_cb", self._on_reconnected, "reconnected"),
+            ("closed_cb", self._on_closed, "closed"),
+        ):
+            wrapped = self._wrap(cb, what)
+            if wrapped is not None:
+                kwargs[key] = wrapped
         self._nc = await nats.connect(self._url, **kwargs)
 
     async def close(self) -> None:
