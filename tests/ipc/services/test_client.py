@@ -448,3 +448,89 @@ def test_start_with_no_service_is_down_then_connects(broker_url):
     assert before == "down"
     assert reply["status"] == "ok"
     assert restarts == []
+
+
+def _wrap_auth(host, before):
+    """Patch the host's auth handler (before start) with ``before(n) -> bool`` (False drops)."""
+    orig = host._on_auth
+    calls = {"n": 0}
+
+    async def on_auth(msg):
+        calls["n"] += 1
+        if await before(calls["n"]):
+            await orig(msg)
+
+    host._on_auth = on_auth
+    return calls
+
+
+def test_handshake_failure_on_current_instance_is_retried(broker_url):
+    async def go():
+        host = _echo_host()
+
+        async def before(n):
+            if n == 1:
+                return False  # first auth.request gets no reply: the client times out
+            return True
+
+        calls = _wrap_auth(host, before)
+        svc = await _core(broker_url)
+        await host.start(svc)
+        cli = await _core(broker_url)
+        client = _client(cli)
+        restarts: list[int] = []
+        client.on_restarted(lambda: restarts.append(1))
+        await client.start()
+        first = client.health
+        await _until(lambda: client.health == "up", timeout=8.0)
+        reply = await client.call("echo", {"retry": True})
+        result = (first, reply, calls["n"], client.session_subject, restarts)
+        await client.close()
+        await host.stop()
+        await svc.close()
+        await cli.close()
+        return result
+
+    first, reply, n, subj, restarts = asyncio.run(go())
+    assert first == "down"
+    assert reply["echo"] == {"retry": True}
+    assert n == 2
+    assert subj is not None
+    assert restarts == []
+
+
+def test_start_does_not_double_handshake(broker_url):
+    async def go():
+        async def before(n):
+            await asyncio.sleep(0.2)  # several 0.05 s beats land during the handshake
+            return True
+
+        host = _echo_host(heartbeat_s=0.05)
+        _wrap_auth(host, before)
+        orig_info = host._on_info
+
+        async def slow_info(msg):
+            await asyncio.sleep(0.2)  # beats also land during the meta.info round trip
+            await orig_info(msg)
+
+        host._on_info = slow_info
+        svc = await _core(broker_url)
+        await host.start(svc)
+        results = []
+        for _ in range(5):
+            cli = await _core(broker_url, RecordingCore)
+            client = _client(cli)
+            await client.start()
+            await asyncio.sleep(0.3)  # time for any spurious reconnect to run
+            auths = sum(s.endswith(".auth.request") for s in cli.private)
+            results.append((auths, len(host.sessions), client.health))
+            await client.close()
+            await cli.close()
+        await host.stop()
+        await svc.close()
+        return results
+
+    for auths, sessions, health in asyncio.run(go()):
+        assert auths == 1
+        assert sessions == 1
+        assert health == "up"

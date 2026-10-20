@@ -41,6 +41,9 @@ DEFAULT_TIMEOUT_S = P.DEFAULT_TIMEOUT_S
 _DEGRADED_AFTER_S = 1.5 * P.HEARTBEAT_S  # 1 missed beat
 _DOWN_AFTER_S = 3.5 * P.HEARTBEAT_S  # 3 missed beats
 _STREAM_PREFIX = "stream."
+# Backoff (clock seconds) between connect attempts after a failure on a live instance.
+_RETRY_BACKOFF_S = (1.0, 2.0, 5.0, 10.0)
+_TERMINAL = frozenset({"incompatible", "unauthorized"})
 
 
 class ServiceCallError(RuntimeError):
@@ -103,6 +106,9 @@ class ServiceClient:
         self._connect_lock = asyncio.Lock()
         self._loop_task: asyncio.Task | None = None
         self._closed = False
+        self._retry_at = 0.0
+        self._failures = 0
+        self._bg: set[asyncio.Task] = set()
 
     # -- callbacks ----------------------------------------------------------------------
 
@@ -165,7 +171,10 @@ class ServiceClient:
         self._set_health("starting")
         self._hb_sub = await self._core.subscribe(P.heartbeat(self._root), self._on_beat)
         await self._core.flush()
-        await self._connect(restarted=False)
+        # Run the first connect as the connect task, so beats arriving meanwhile don't start
+        # a second one.
+        self._connect_task = asyncio.create_task(self._reconnect(False))
+        await self._connect_task
         self._loop_task = asyncio.create_task(self._monitor_loop())
 
     async def close(self) -> None:
@@ -174,6 +183,7 @@ class ServiceClient:
             return
         self._closed = True
         tasks = [t for t in (self._loop_task, self._ping_task, self._connect_task) if t]
+        tasks += list(self._bg)
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -196,13 +206,45 @@ class ServiceClient:
         self._delivery_root = None
         self._streams.clear()
 
-    async def _connect(self, *, restarted: bool) -> None:
+    async def _connect(self, *, restarted: bool, iid: str | None = None) -> None:
         async with self._connect_lock:
             if self._closed:
                 return
-            await self._do_connect(restarted)
+            if iid is not None and iid == self._instance_id and self._session_subject:
+                return  # already connected to that instance
+            try:
+                await self._do_connect(restarted)
+            finally:
+                self._note_attempt()
+
+    def _note_attempt(self) -> None:
+        if self._session_subject is not None:
+            self._failures = 0
+            self._retry_at = 0.0
+        elif self.health not in _TERMINAL:
+            delay = _RETRY_BACKOFF_S[min(self._failures, len(_RETRY_BACKOFF_S) - 1)]
+            self._failures += 1
+            self._retry_at = self._clock() + delay
+
+    def _spawn(self, coro: Any) -> None:
+        t = asyncio.create_task(coro)
+        self._bg.add(t)
+        t.add_done_callback(self._bg.discard)
+
+    async def _close_session(self, subj: str) -> None:
+        try:
+            await self._core.request_private(
+                P.rpc_subject(subj, "session.close"), {}, DEFAULT_TIMEOUT_S
+            )
+        except Exception as e:
+            log.debug("session.close of replaced session failed: %s", e)
 
     async def _drop_session(self) -> None:
+        old = self._session_subject
+        if old is not None:
+            # Best effort, in the background: the old instance may be gone or have
+            # expired the lease, and the new handshake must not wait for it.
+            self._spawn(self._close_session(old))
         self._session_subject = None
         self._streams.clear()
         sub, self._delivery_sub = self._delivery_sub, None
@@ -322,17 +364,25 @@ class ServiceClient:
                 return
             if self.health in ("degraded", "down") and self._session_subject is not None:
                 self._set_health("up")
+            elif (
+                self._session_subject is None
+                and self.health not in _TERMINAL
+                and self._connect_task is None
+                and self._clock() >= self._retry_at
+            ):
+                # The instance is alive but our last connect attempt failed: retry.
+                self._connect_task = asyncio.create_task(self._reconnect(False, iid))
             return
-        if stopping or self._connect_task is not None:
+        if stopping or self._connect_task is not None or self._clock() < self._retry_at:
             return
         restarted = self._instance_id is not None
-        self._connect_task = asyncio.create_task(self._reconnect(restarted))
+        self._connect_task = asyncio.create_task(self._reconnect(restarted, iid))
 
-    async def _reconnect(self, restarted: bool) -> None:
+    async def _reconnect(self, restarted: bool, iid: str | None = None) -> None:
         try:
             if self.health not in ("unknown", "starting"):
                 self._set_health("starting")
-            await self._connect(restarted=restarted)
+            await self._connect(restarted=restarted, iid=iid)
         except asyncio.CancelledError:
             raise
         except Exception as e:
