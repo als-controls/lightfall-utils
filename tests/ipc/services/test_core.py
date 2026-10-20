@@ -196,3 +196,23 @@ def test_methods_raise_after_close(broker_url):
             await core.flush()
 
     asyncio.run(go())
+
+
+def test_flush_pushes_pending_buffer_before_ping():
+    """nats-py writes PING ahead of still-buffered SUBs; flush() must push the buffer first.
+
+    Otherwise a peer's request issued after flush() can race the SUBs and see no responders.
+    """
+    calls = []
+
+    class FakeNC:
+        async def _flush_pending(self, force_flush=False):
+            calls.append(("pending", force_flush))
+
+        async def flush(self, timeout):
+            calls.append(("ping", timeout))
+
+    core = NatsCore("nats://unused")
+    core._nc = FakeNC()
+    asyncio.run(core.flush(1.5))
+    assert calls == [("pending", True), ("ping", 1.5)]

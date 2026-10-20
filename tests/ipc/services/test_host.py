@@ -369,3 +369,116 @@ def test_serve_forever_returns_after_stop(broker_url):
         await svc.close()
 
     asyncio.run(go())
+
+
+@pytest.mark.parametrize("key", ["contract", "status", "contract_version"])
+def test_handler_result_with_reserved_key_is_error_reply(broker_url, key):
+    async def go():
+        host = _host()
+
+        @host.rpc("bad")
+        async def bad(session, payload):
+            return {key: "x", "other": 1}
+
+        svc, cli = await _pair(broker_url, host)
+        subj = (await _auth(host, cli))["session_subject"]
+        rep = await cli.request_private(P.rpc_subject(subj, "bad"), {}, timeout=1.0)
+        await _teardown(host, svc, cli)
+        return rep
+
+    rep = asyncio.run(go())
+    assert rep["status"] == "error"
+    assert rep["code"] == "unknown"
+    assert rep["contract_version"] == CONTRACT
+    assert key in rep["message"]
+
+
+@pytest.mark.parametrize("bad", [None, 12, ["x"], {"a": 1}, ""])
+def test_stdin_token_non_str_denied(broker_url, bad):
+    secret = new_token()
+
+    async def go():
+        host = _host(stdin_token=secret)
+        svc, cli = await _pair(broker_url, host)
+        rep = await _auth(host, cli, session_token=bad)
+        await _teardown(host, svc, cli)
+        return rep
+
+    rep = asyncio.run(go())
+    assert rep["status"] == "error" and rep["code"] == "denied"
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"stdin_token": ""},
+        {"stdin_token": "a.b"},
+        {"stdin_token": "a*"},
+        {"stdin_token": ">"},
+        {"stdin_token": "a b"},
+        {"stdin_token": 5},
+        {"heartbeat_s": 0},
+        {"heartbeat_s": -1.0},
+        {"heartbeat_s": float("nan")},
+        {"heartbeat_s": float("inf")},
+    ],
+)
+def test_init_validation(kw):
+    with pytest.raises(ValueError):
+        _host(**kw)
+
+
+def _sync_boom(session, payload):
+    raise RuntimeError("sync kaboom")
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "auth_malformed_json",
+        "auth_bad_delivery_token",
+        "rpc_non_dict",
+        "rpc_bad_json",
+        "handler_non_dict",
+        "sync_handler_raises",
+    ],
+)
+def test_malformed_inputs(broker_url, case):
+    async def go():
+        host = _host()
+        host.rpc("listy")(lambda s, p: [1, 2])
+        host.rpc("boom")(_sync_boom)
+        svc, cli = await _pair(broker_url, host)
+        subj = (await _auth(host, cli))["session_subject"]
+        nc = cli._conn()
+        if case == "auth_malformed_json":
+            msg = await nc.request(P.auth_subject(host.priv_root), b"{not json", timeout=1.0)
+            rep = json.loads(msg.data)
+        elif case == "auth_bad_delivery_token":
+            rep = await _auth(host, cli, delivery_token="a.b")
+        elif case == "rpc_non_dict":
+            rep = await cli.request_private(P.rpc_subject(subj, "listy"), [1, 2])
+        elif case == "rpc_bad_json":
+            msg = await nc.request(P.rpc_subject(subj, "listy"), b"\xff\xfe", timeout=1.0)
+            rep = json.loads(msg.data)
+        elif case == "handler_non_dict":
+            rep = await cli.request_private(P.rpc_subject(subj, "listy"), {})
+        else:
+            rep = await cli.request_private(P.rpc_subject(subj, "boom"), {})
+        await _teardown(host, svc, cli)
+        return rep
+
+    rep = asyncio.run(go())
+    expected = {
+        "auth_malformed_json": "denied",
+        "auth_bad_delivery_token": "bad_request",
+        "rpc_non_dict": "bad_request",
+        "rpc_bad_json": "bad_request",
+        "handler_non_dict": "unknown",
+        "sync_handler_raises": "unknown",
+    }[case]
+    assert rep["status"] == "error", rep
+    assert rep["code"] == expected
+    assert rep["contract_version"] == CONTRACT
+    if case == "sync_handler_raises":
+        assert rep["message"] == "sync kaboom"

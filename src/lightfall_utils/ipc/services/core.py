@@ -64,7 +64,17 @@ class NatsCore:
         return self._nc
 
     async def flush(self, timeout: float = DEFAULT_TIMEOUT_S) -> None:
-        await self._conn().flush(timeout=timeout)
+        """Return once every command issued so far (SUB, PUB, UNSUB) has reached the server.
+
+        nats-py's ``flush()`` writes its PING straight to the socket, ahead of commands still
+        in the client's pending buffer, so its PONG can arrive before those SUBs are applied.
+        Push the buffer out first.
+        """
+        nc = self._conn()
+        push = getattr(nc, "_flush_pending", None)
+        if push is not None:
+            await push(force_flush=True)
+        await nc.flush(timeout=timeout)
 
     async def subscribe(self, subject: str, cb: Callable[[Msg], Awaitable[None]]):
         return await self._conn().subscribe(subject, cb=cb)

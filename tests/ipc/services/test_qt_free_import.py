@@ -6,7 +6,8 @@ def test_capability_and_services_import_without_qt():
     code = (
         "import sys; import lightfall_utils.ipc.capability, "
         "lightfall_utils.ipc.services, lightfall_utils.ipc.services.core, lightfall_utils.ipc.services.descriptor, "
-        "lightfall_utils.ipc.services.host; print('PySide6' in sys.modules)"
+        "lightfall_utils.ipc.services.host, lightfall_utils.ipc.services.cli, "
+        "lightfall_utils.ipc.services.echo; print('PySide6' in sys.modules)"
     )
     out = subprocess.run(
         [sys.executable, "-I", "-c", code], capture_output=True, text=True, check=True
