@@ -54,6 +54,11 @@ class LocalLauncher:
         self._log = None
 
     @property
+    def session_token(self) -> str:
+        """The session token written to each child's stdin."""
+        return self._token
+
+    @property
     def last_stderr(self) -> list[str]:
         return list(self._stderr)
 

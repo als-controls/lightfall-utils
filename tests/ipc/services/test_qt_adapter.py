@@ -75,7 +75,7 @@ def test_state_signal_on_main_thread(qtbot, broker_url, tmp_path):
         assert client.health == "up"
         # The minted token reached both the launcher and the client.
         assert len(created) == 1
-        assert client.session_token and created[0]._token == client.session_token
+        assert client.session_token and created[0].session_token == client.session_token
         names = [t.name for t in threading.enumerate()]
         assert "svc-echo" in names
     finally:
@@ -187,3 +187,47 @@ def test_launcher_gave_up_reports_down_with_stderr(qtbot, broker_url, tmp_path):
         assert client.launcher.state == "gave_up"
     finally:
         client.stop()
+
+
+def _free_port() -> int:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def test_broker_started_late_reaches_up(qtbot, tmp_path):
+    from lightfall_utils.ipc import LocalNatsServer
+
+    port = _free_port()
+    url = f"nats://127.0.0.1:{port}"
+    client, created, _ = _echo(url, tmp_path)
+    server = LocalNatsServer(port=port, host="127.0.0.1")
+    try:
+        with qtbot.waitSignal(
+            client.state_changed, timeout=15000, check_params_cb=lambda s: s == "down"
+        ):
+            client.start()
+        assert "cannot connect" in client.last_error
+        # Queued calls resolve promptly with the "no session" error dict.
+        reply = client.call("echo", {}).result(timeout=5)
+        assert reply["status"] == "error"
+        server.start(timeout_s=10.0)
+        _wait_up(qtbot, client, timeout=30000)
+        assert client.call("echo", {"a": 1}).result(timeout=5)["echo"] == {"a": 1}
+    finally:
+        client.stop()
+        server.stop()
+
+
+def test_restarted_signal_after_child_killed(qtbot, started):
+    client, created, _ = started
+    client.start()
+    _wait_up(qtbot, client)
+    old_proc = created[0]._proc
+    with qtbot.waitSignal(client.restarted, timeout=30000):
+        old_proc.kill()
+    _wait_up(qtbot, client)
+    assert created[0]._proc is not old_proc
+    assert client.call("echo", {"b": 2}).result(timeout=5)["echo"] == {"b": 2}
