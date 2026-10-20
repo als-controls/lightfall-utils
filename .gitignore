@@ -7,3 +7,7 @@ build/
 .coverage
 src/lightfall_utils/_version.py
 .ruff_cache/
+
+# superpowers specs/plans and scratch: never commit
+docs/superpowers/
+.superpowers/
