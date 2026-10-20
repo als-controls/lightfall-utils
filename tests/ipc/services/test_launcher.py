@@ -81,7 +81,7 @@ def test_gives_up_after_5_in_60s(tmp_path):
         assert any("boom message" in line for line in la.last_stderr)
         assert len(la.last_stderr) <= 20
         await la.stop(None)
-        assert la.state == "gave_up"
+        assert la.state == "stopped"
 
     asyncio.run(main())
     assert "boom message" in (tmp_path / "log.txt").read_text()
@@ -121,3 +121,127 @@ def test_closing_launcher_closes_child_stdin(tmp_path):
 
     asyncio.run(main())
     assert marker.read_text() == "eof"
+
+
+async def _noop_sleep(d):
+    await asyncio.sleep(0)
+
+
+def test_raising_on_exit_callback_does_not_kill_supervisor(tmp_path):
+    seen = []
+
+    def bad(rc):
+        seen.append(rc)
+        raise RuntimeError("cb boom")
+
+    async def main():
+        la = LocalLauncher(
+            _py("import sys; sys.exit(2)"),
+            session_token="t",
+            log_path=tmp_path / "log.txt",
+            clock=lambda: 0.0,
+            sleep=_noop_sleep,
+        )
+        la.on_exit(bad)
+        await la.start()
+        assert await _wait_for(lambda: la.state == "gave_up")
+        await la.stop(None)
+
+    asyncio.run(main())
+    assert seen == [2] * 5
+
+
+def test_restart_spawn_failure_counts_and_gives_up(tmp_path):
+    async def main():
+        la = LocalLauncher(
+            _py("import sys; sys.exit(1)"),
+            session_token="t",
+            log_path=tmp_path / "log.txt",
+            clock=lambda: 0.0,
+            sleep=_noop_sleep,
+        )
+        await la.start()
+        la._command = [str(tmp_path / "no-such-executable")]
+        assert await _wait_for(lambda: la.state == "gave_up")
+        assert any("spawn failed" in line for line in la.last_stderr)
+        await la.stop(None)
+
+    asyncio.run(main())
+
+
+def test_stop_during_backoff_is_prompt(tmp_path):
+    async def long_sleep(d):
+        await asyncio.sleep(30)
+
+    async def main():
+        la = LocalLauncher(
+            _py("import sys; sys.exit(1)"),
+            session_token="t",
+            log_path=tmp_path / "log.txt",
+            sleep=long_sleep,
+        )
+        await la.start()
+        assert await _wait_for(lambda: la.state == "backoff")
+        t0 = time.monotonic()
+        await la.stop(None)
+        assert time.monotonic() - t0 < 2.0
+        assert la.state == "stopped"
+
+    asyncio.run(main())
+
+
+def test_stop_during_restart_spawn_leaves_no_orphan(tmp_path, monkeypatch):
+    real = asyncio.create_subprocess_exec
+    procs = []
+    in_spawn = asyncio.Event
+    state = {}
+
+    async def slow_exec(*a, **kw):
+        if procs:  # restart spawn, not the first
+            state["ev"].set()
+            await asyncio.sleep(0.5)
+        p = await real(*a, **kw)
+        procs.append(p)
+        return p
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", slow_exec)
+
+    async def main():
+        state["ev"] = in_spawn()
+        la = LocalLauncher(
+            _py("import sys; sys.exit(1)"),
+            session_token="t",
+            log_path=tmp_path / "log.txt",
+            clock=lambda: 0.0,
+            sleep=_noop_sleep,
+        )
+        await la.start()
+        await asyncio.wait_for(state["ev"].wait(), 10)
+        await la.stop(None, grace_s=1.0)
+        await asyncio.sleep(0.2)
+        assert la.state == "stopped"
+
+    asyncio.run(main())
+    assert len(procs) >= 2
+    assert all(p.returncode is not None for p in procs)
+
+
+def test_exits_outside_window_do_not_count(tmp_path):
+    ticks = iter(range(0, 10_000, 30))  # 30 s apart; window 60 -> at most 2 in window
+    exits = []
+
+    async def main():
+        la = LocalLauncher(
+            _py("import sys; sys.exit(1)"),
+            session_token="t",
+            log_path=tmp_path / "log.txt",
+            clock=lambda: next(ticks),
+            sleep=_noop_sleep,
+        )
+        la.on_exit(exits.append)
+        await la.start()
+        assert await _wait_for(lambda: len(exits) >= 7)
+        assert la.state != "gave_up"
+        await la.stop(None)
+
+    asyncio.run(main())
