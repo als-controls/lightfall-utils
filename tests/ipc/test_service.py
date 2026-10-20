@@ -306,6 +306,17 @@ class TestAuthHandshake:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def _reset_conn_state():
+    """Reset connection state the test may have set on the services it builds."""
+    made: list[IPCService] = []
+    yield made
+    for svc in made:
+        svc._nc = None
+        with svc._connected_lock:
+            svc._connected = False
+
+
 class TestRequest:
     def test_request_returns_none_when_not_connected(self, qapp):
         svc = IPCService(nats_url="nats://localhost:4222", topic_prefix="test")
@@ -313,8 +324,9 @@ class TestRequest:
         result = svc.request("test.ping", {})
         assert result is None
 
-    def test_request_returns_none_when_no_loop(self, qapp):
+    def test_request_returns_none_when_no_loop(self, qapp, _reset_conn_state):
         svc = IPCService(nats_url="nats://localhost:4222", topic_prefix="test")
+        _reset_conn_state.append(svc)
         # Manually set connected but no loop
         with svc._connected_lock:
             svc._connected = True
@@ -348,8 +360,9 @@ class TestInstanceIdentity:
 
 
 class TestCapabilityConnect:
-    def test_connect_uses_capability(self, qapp):
+    def test_connect_uses_capability(self, qapp, _reset_conn_state):
         svc = IPCService(nats_url="nats://localhost:4222", topic_prefix="test")
+        _reset_conn_state.append(svc)
         svc._shutdown_event.set()
         fake_nc = MagicMock()
         with patch("lightfall_utils.ipc.service.nats.connect", new=MagicMock()) as conn:

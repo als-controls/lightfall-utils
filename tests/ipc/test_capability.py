@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import socket
 
 import nats
@@ -49,6 +50,9 @@ def test_new_token():
     tok = new_token()
     assert len(tok) == 43
     assert tok != new_token()
+    # URL-safe base64 alphabet, no "=" padding
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", tok)
+    assert "=" not in tok
 
 
 def _free_port() -> int:

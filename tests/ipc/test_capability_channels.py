@@ -6,12 +6,30 @@ IPCService.__new__ + manual attribute injection, capturing outbound replies.
 
 from __future__ import annotations
 
+import asyncio
+import json
+import socket
 import threading
 
+import nats
 import pytest
 
-from lightfall_utils.ipc.capability import new_capability
+from lightfall_utils.ipc import LocalNatsServer
+from lightfall_utils.ipc.capability import PrivateNoResponders, new_capability, private_request
 from lightfall_utils.ipc.service import IPCService
+
+
+@pytest.fixture(scope="module")
+def broker_url():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    server = LocalNatsServer(port=port, host="127.0.0.1")
+    server.start(timeout_s=10.0)
+    try:
+        yield f"nats://127.0.0.1:{port}"
+    finally:
+        server.stop()
 
 
 def _make_ipc(prefix: str = "als.test") -> tuple[IPCService, list[tuple[str, dict]]]:
@@ -267,14 +285,44 @@ class TestPrivateRoot:
         ipc, sent = _make_ipc()
         ipc._handle_meta_events("s", {}, "_INBOX.e")
         ipc._handle_discover("s", {}, "_INBOX.d")
-        assert sent[-2][1]["priv_root"] == ipc.priv_root
-        assert sent[-1][1]["priv_root"] == ipc.priv_root
+        by_subject = dict(sent)
+        assert by_subject["_INBOX.e"]["priv_root"] == ipc.priv_root
+        assert by_subject["_INBOX.d"]["priv_root"] == ipc.priv_root
 
     def test_private_action_only_on_priv_root(self):
         ipc, _ = _make_ipc()
         ipc.register_action("auth.request", lambda s, d, r: None, private=True)
         assert ipc.topic("auth.request") not in ipc._subscriptions
         assert f"{ipc.priv_root}.auth.request" in ipc._subscriptions
+
+    def test_private_action_request_path_only_answers_on_priv_root(self, broker_url):
+        """Broker roundtrip: a request to the public topic(suffix) has no responder;
+        the same request to {priv_root}.suffix is answered."""
+        ipc, _ = _make_ipc()
+        ipc.register_action("auth.request", lambda s, d, r: None, private=True)
+        public = ipc.topic("auth.request")
+        private = f"{ipc.priv_root}.auth.request"
+        # Subscribe on the broker to exactly the subjects the service registered.
+        assert public not in ipc._subscriptions and private in ipc._subscriptions
+
+        async def run():
+            cap = new_capability()
+            nc = await nats.connect(broker_url, **cap.connect_kwargs())
+            try:
+
+                async def answer(msg):
+                    await nc.publish(msg.reply, json.dumps({"ok": True}).encode())
+
+                for subject in ipc._subscriptions:
+                    await nc.subscribe(subject, cb=answer)
+                await nc.flush()
+                with pytest.raises(PrivateNoResponders):
+                    await private_request(nc, public, {}, timeout=2)
+                assert await private_request(nc, private, {}, timeout=2) == {"ok": True}
+            finally:
+                await nc.close()
+
+        asyncio.run(run())
 
     def test_private_action_flagged_in_catalog(self):
         ipc, _ = _make_ipc()
