@@ -24,23 +24,38 @@ The capability is created once per `IPCService` and reused across reconnects, so
 
 ```python
 import nats
-from lightfall_utils.ipc.capability import new_capability, private_auth_request
+from lightfall_utils.ipc.capability import new_capability, private_auth_request, private_request
 
 cap = new_capability()            # .secret, .prefix, .inbox_prefix, .priv_root
 nc = await nats.connect(url, **cap.connect_kwargs())   # {"token": ..., "inbox_prefix": ...}
 
 # Discover priv_root via {prefix}.meta.actions, then request {priv_root}.auth.request
 reply = await private_auth_request(nc, "als.7011", {"app_name": "my-tool", "app_version": "1.0"})
-session_subject = reply["session_subject"]   # send commands to f"{session_subject}.<action>"
+session_subject = reply["session_subject"]
+
+# Every session call goes through private_request (never nc.request):
+status = await private_request(nc, f"{session_subject}.device.status", {"device": "m1"})
 ```
+
+**Why `private_request`.** Inbox isolation protects *reads*: no other connection can subscribe
+to your `_INBOX.<p>`. It does not stop *writes*. nats-server lets any connection answer a message
+it received with a reply subject (`allow_responses`), and a publisher may set any reply subject,
+so a connection can reflect a forged message into your inbox if it can guess the exact reply
+subject. The reply subjects nats-py's `request()` generates are predictable to anyone who has
+seen one of your public requests. `private_request` replies to `<inbox_prefix>.<new_token()>`
+instead, a subject only the `_PRIV` owner you sent it to ever sees. Replies to *public* requests
+(`meta.actions`, discovery, public actions) can still be forged; treat them like spoofable
+discovery.
 
 | Name | Purpose |
 |---|---|
 | `new_capability()` | Fresh `ConnectionCapability(secret, prefix)` with `inbox_prefix`, `priv_root`, `connect_kwargs()` |
 | `derive_prefix(secret)` | The secret → `p` derivation the callout uses |
 | `new_token()` | 32 random bytes, URL-safe (43 chars); used for secrets, session and delivery tokens |
-| `private_auth_request(nc, topic_prefix, payload, timeout=5.0)` | Two-step private handshake; returns the decoded reply |
-| `PrivateRootUnavailable` | Raised when `meta.actions` has no `priv_root` (a pre-callout peer) |
+| `private_request(nc, subject, payload, timeout=5.0, inbox_prefix=None)` | One JSON request on an unguessable reply subject `<inbox_prefix>.<token>`; use it for every `{priv_root}.*` and `{session_subject}.*` call. `inbox_prefix` defaults to the connection's own |
+| `private_auth_request(nc, topic_prefix, payload, timeout=5.0)` | Two-step private handshake (the `auth.request` leg goes through `private_request`); returns the decoded reply |
+| `PrivateRootUnavailable` | Raised when `meta.actions` has no `priv_root` (a pre-callout peer) or one not shaped `_PRIV.<26 base32 chars>` |
+| `PrivateNoResponders` | Raised by `private_request` when nobody is subscribed to the subject |
 | `VENDORED_FROM` | Version marker checked by vendored copies |
 
 **Vendoring rule.** Importing `lightfall_utils.ipc` pulls in PySide6, so headless repositories copy
@@ -53,19 +68,19 @@ third-party imports, and change it only here, then re-copy it everywhere.
 Public subjects live under a configurable prefix (e.g., `"als.lightfall"`). Well-known discovery
 uses no prefix. Private subjects live under the instance's private root `_PRIV.<p>`:
 
-- **Meta discovery (no auth required):** `{prefix}.meta.actions` — list registered actions; `{prefix}.meta.events` — list registered events. Both replies carry `priv_root`
+- **Meta discovery (no auth required):** `{prefix}.meta.actions` — list registered actions; `{prefix}.meta.events` — list registered events. Both replies carry `priv_root`; catalog entries for `private=True` actions carry `"private": true`
 - **Peer discovery (no prefix):** `_lightfall.discover` — scatter-gather request/reply to find all live services; replies carry `priv_root`
 - **Auth handshake (private):** `{priv_root}.auth.request` when registered with `private=True` (as Lightfall does) — app sends `{"app_name", "app_version"}`, service replies with approval/denial, `session_token` and `session_subject`
 - **Session capability channels:** `{priv_root}.session.{token}.>` — per-app capability subject after successful auth; routes to trusted actions with identity attached
 
 ## Trust Handshake Sequence
 
-1. App discovers `priv_root` (from `meta.actions` or `_lightfall.discover`) and sends a request to `{priv_root}.auth.request` with `{"app_name", "app_version"}`; the reply goes to its own `_INBOX.<p>`
+1. App discovers `priv_root` (from `meta.actions` or `_lightfall.discover`) and sends a request to `{priv_root}.auth.request` with `{"app_name", "app_version"}`; the reply goes to an unguessable subject in its own `_INBOX.<p>` (`private_request`)
 2. Service evaluates trust via `evaluate_trust(app_name)` (delegates to a configured `TrustManager`)
    - If `UNKNOWN`, the service may prompt the user with a `TrustDialog`
    - If `DENIED`, reply with `{"status": "denied", ...}`
    - If `APPROVED`, mint a session capability channel token and reply with `{"status": "approved", "session_token": "...", "session_subject": "_PRIV.<p>.session.<token>", ...}`
-3. App sends requests for trusted actions to `{session_subject}.action_name` instead of the bare `{prefix}.action_name` (which answers `denied`)
+3. App sends requests for trusted actions to `{session_subject}.action_name` (with `private_request`, so the reply subject is unguessable) instead of the bare `{prefix}.action_name` (which answers `denied`)
 4. Service attaches identity to the request: `data["_identity"] = {"app_name", "session_token"}`
 
 When an app re-authenticates, existing tokens for that app are revoked.

@@ -276,6 +276,14 @@ class TestPrivateRoot:
         assert ipc.topic("auth.request") not in ipc._subscriptions
         assert f"{ipc.priv_root}.auth.request" in ipc._subscriptions
 
+    def test_private_action_flagged_in_catalog(self):
+        ipc, _ = _make_ipc()
+        ipc.register_action("auth.request", lambda s, d, r: None, private=True)
+        ipc.register_action("ping", lambda s, d, r: None)
+        entries = {e["subject"]: e for e in ipc.list_actions()}
+        assert entries["auth.request"]["private"] is True
+        assert "private" not in entries["ping"]
+
     def test_private_and_trusted_exclusive(self):
         ipc, _ = _make_ipc()
         with pytest.raises(ValueError):

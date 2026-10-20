@@ -11,17 +11,26 @@ import pytest
 
 from lightfall_utils.ipc import LocalNatsServer
 from lightfall_utils.ipc.capability import (
+    VENDORED_FROM,
+    PrivateNoResponders,
     PrivateRootUnavailable,
     derive_prefix,
     new_capability,
     new_token,
     private_auth_request,
+    private_request,
 )
+
+GOOD_ROOT = "_PRIV." + "a" * 26
 
 
 def test_vectors():
     assert derive_prefix("test-secret-0001") == "r5itqnjn2uhkfjylxqpf7fwjv7"
     assert derive_prefix("A" * 43) == "3dcidrblqoesmah3mp7u5jx4cx"
+
+
+def test_vendored_from():
+    assert VENDORED_FROM == "lightfall_utils.ipc.capability v2"
 
 
 def test_capability_shape():
@@ -65,13 +74,13 @@ def test_private_auth_request_roundtrip(broker_url):
         try:
 
             async def actions(msg):
-                await nc.publish(msg.reply, json.dumps({"priv_root": "_PRIV.x"}).encode())
+                await nc.publish(msg.reply, json.dumps({"priv_root": GOOD_ROOT}).encode())
 
             async def auth(msg):
                 await nc.publish(msg.reply, msg.data)
 
             await nc.subscribe("t.meta.actions", cb=actions)
-            await nc.subscribe("_PRIV.x.auth.request", cb=auth)
+            await nc.subscribe(f"{GOOD_ROOT}.auth.request", cb=auth)
             await nc.flush()
             payload = {"a": 1, "b": ["x"]}
             assert await private_auth_request(nc, "t", payload) == payload
@@ -97,3 +106,99 @@ def test_private_auth_request_missing_priv_root(broker_url):
             await nc.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "root",
+    ["als.x", "_PRIV.x", "_PRIV." + "a" * 25, "_PRIV." + "A" * 26, "_PRIV." + "a" * 26 + ".x",
+     "_PRIV." + "a" * 26 + "\n", "_INBOX." + "a" * 26, 7],
+)  # fmt: skip
+def test_private_auth_request_rejects_bad_priv_root(broker_url, root):
+    async def run():
+        nc = await nats.connect(broker_url)
+        try:
+            hits = []
+
+            async def actions(msg):
+                await nc.publish(msg.reply, json.dumps({"priv_root": root}).encode())
+
+            async def anything(msg):
+                hits.append(msg.subject)
+
+            await nc.subscribe("v.meta.actions", cb=actions)
+            await nc.subscribe("als.>", cb=anything)
+            await nc.flush()
+            with pytest.raises(PrivateRootUnavailable):
+                await private_auth_request(nc, "v", {"secret": 1}, timeout=1)
+            await nc.flush()
+            assert hits == []
+        finally:
+            await nc.close()
+
+    asyncio.run(run())
+
+
+def test_private_request_uses_unguessable_reply(broker_url):
+    async def run():
+        cap = new_capability()
+        nc = await nats.connect(broker_url, **cap.connect_kwargs())
+        try:
+            replies = []
+
+            async def echo(msg):
+                replies.append(msg.reply)
+                await nc.publish(msg.reply, msg.data)
+
+            await nc.subscribe("w.echo", cb=echo)
+            await nc.flush()
+            assert await private_request(nc, "w.echo", {"n": 1}) == {"n": 1}
+            assert await private_request(nc, "w.echo", {"n": 2}, inbox_prefix=cap.inbox_prefix) == {
+                "n": 2
+            }
+            for reply in replies:
+                head, token = reply.rsplit(".", 1)
+                assert head == cap.inbox_prefix
+                assert len(token) == 43
+            assert replies[0] != replies[1]
+        finally:
+            await nc.close()
+
+    asyncio.run(run())
+
+
+def test_private_request_timeout(broker_url):
+    async def run():
+        nc = await nats.connect(broker_url, **new_capability().connect_kwargs())
+        try:
+
+            async def silent(msg):
+                pass
+
+            await nc.subscribe("x.silent", cb=silent)
+            await nc.flush()
+            with pytest.raises(TimeoutError):
+                await private_request(nc, "x.silent", {}, timeout=0.3)
+        finally:
+            await nc.close()
+
+    asyncio.run(run())
+
+
+def test_private_request_no_responders(broker_url):
+    async def run():
+        nc = await nats.connect(broker_url, **new_capability().connect_kwargs())
+        try:
+            with pytest.raises(PrivateNoResponders):
+                await private_request(nc, "y.nobody", {}, timeout=2)
+        finally:
+            await nc.close()
+
+    asyncio.run(run())
+
+
+def test_private_request_needs_inbox_prefix():
+    class Bare:
+        pass
+
+    with pytest.raises(ValueError):
+        asyncio.run(private_request(Bare(), "z", {}))

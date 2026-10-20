@@ -42,6 +42,7 @@ class ActionInfo:
     subject: str
     description: str = ""
     schema: dict[str, Any] | None = None
+    private: bool = False
 
 
 @dataclass
@@ -232,7 +233,7 @@ class IPCService(QObject):
             raise ValueError("register_action: 'private' and 'trusted' are mutually exclusive")
         full_subject = f"{self.priv_root}.{suffix}" if private else self.topic(suffix)
         self._action_catalog[suffix] = ActionInfo(
-            subject=suffix, description=description, schema=schema
+            subject=suffix, description=description, schema=schema, private=private
         )
         if trusted:
             self._trusted_actions[suffix] = _Subscription(
@@ -266,11 +267,22 @@ class IPCService(QObject):
         )
 
     def list_actions(self) -> list[dict[str, Any]]:
-        """Return catalog metadata for all registered actions."""
-        return [
-            {"subject": info.subject, "description": info.description, "schema": info.schema}
-            for info in self._action_catalog.values()
-        ]
+        """Return catalog metadata for all registered actions.
+
+        Entries for ``private=True`` actions carry ``"private": True``: they are served
+        on ``{priv_root}.{subject}``, not on the public prefixed subject.
+        """
+        out: list[dict[str, Any]] = []
+        for info in self._action_catalog.values():
+            entry: dict[str, Any] = {
+                "subject": info.subject,
+                "description": info.description,
+                "schema": info.schema,
+            }
+            if info.private:
+                entry["private"] = True
+            out.append(entry)
+        return out
 
     def list_events(self) -> list[dict[str, Any]]:
         """Return catalog metadata for all registered events."""
