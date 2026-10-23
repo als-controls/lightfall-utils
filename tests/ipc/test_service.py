@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import platform
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -393,3 +393,51 @@ class TestCapabilityConnect:
         finally:
             logger.remove(hid)
         assert any(r["level"].name == "WARNING" and "lab.x" in r["message"] for r in records)
+
+
+# ---------------------------------------------------------------------------
+# TestCleanShutdown
+# ---------------------------------------------------------------------------
+
+
+class TestCleanShutdown:
+    def test_stop_after_connect_logs_no_error(self, qapp, _reset_conn_state):
+        """A normal connect-then-stop must not log the serve loop as failed.
+
+        Regression for GlitchTip LIGHTFALL-2: stop() set the shutdown event and
+        then called ``loop.stop()`` straight away, while the serve coroutine was
+        still sleeping in its 0.1 s poll. ``run_until_complete`` then raised
+        "Event loop stopped before Future completed.", which _run_loop logged
+        at ERROR on every ordinary app exit.
+        """
+        import time
+
+        from loguru import logger
+
+        svc = IPCService(nats_url="nats://localhost:4222", topic_prefix="test")
+        _reset_conn_state.append(svc)
+        fake_nc = MagicMock()
+        fake_nc.drain = AsyncMock()
+        fake_nc.subscribe = AsyncMock()
+
+        async def _fake_connect(*a, **kw):
+            return fake_nc
+
+        records = []
+        hid = logger.add(lambda m: records.append(m.record), level="ERROR")
+        try:
+            with patch(
+                "lightfall_utils.ipc.service.nats.connect", new=MagicMock(side_effect=_fake_connect)
+            ):
+                svc.start()
+                deadline = time.monotonic() + 5.0
+                while not svc.is_connected and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert svc.is_connected
+                svc.stop()
+        finally:
+            logger.remove(hid)
+
+        assert svc._thread is None
+        fake_nc.drain.assert_awaited_once()
+        assert [r["message"] for r in records] == []

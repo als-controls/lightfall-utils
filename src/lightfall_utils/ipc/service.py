@@ -628,15 +628,19 @@ class IPCService(QObject):
 
         self._shutdown_event.set()
 
-        if self._loop is not None and not self._loop.is_closed():
+        # The serve coroutine polls the shutdown event and returns on its own,
+        # letting run_until_complete finish cleanly. Stopping the loop while it
+        # is still pending makes run_until_complete raise "Event loop stopped
+        # before Future completed.", so only force it when the thread is stuck.
+        self._thread.join(timeout=5)
+        if self._thread.is_alive() and self._loop is not None and not self._loop.is_closed():
             try:
                 self._loop.call_soon_threadsafe(self._loop.stop)
             except RuntimeError:
                 # Loop closed between the is_closed() check and the call —
                 # the thread is already exiting on its own.
                 pass
-
-        self._thread.join(timeout=5)
+            self._thread.join(timeout=1)
         self._thread = None
         self._loop = None
 
