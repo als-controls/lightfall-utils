@@ -6,7 +6,12 @@ from lightfall_utils.ipc.services import protocol as p
 def test_constants():
     assert p.SVC_PROTOCOL == 1
     assert (p.HEARTBEAT_S, p.PING_S, p.LEASE_S, p.STREAM_IDLE_S, p.DEFAULT_TIMEOUT_S) == (
-        2.0, 5.0, 30.0, 10.0, 2.0)
+        2.0,
+        5.0,
+        30.0,
+        10.0,
+        2.0,
+    )
     assert (p.HDR_SEQ, p.HDR_KIND, p.HDR_FINAL) == ("Svc-Seq", "Svc-Kind", "Svc-Final")
 
 
