@@ -67,6 +67,10 @@ async def _auth(cli, info, **extra):
 def _kill(proc):
     if proc.poll() is None:
         proc.kill()
+    # communicate() flushes stdin first; on POSIX before Python 3.13 a stdin
+    # the test already closed raises "I/O operation on closed file".
+    if proc.stdin is not None and proc.stdin.closed:
+        proc.stdin = None
     proc.communicate(timeout=5)
 
 
