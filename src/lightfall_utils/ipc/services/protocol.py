@@ -25,6 +25,7 @@ ERROR_CODES = _base.BASE_ERROR_CODES | frozenset({"incompatible"})
 
 _BAD_CHARS = re.compile(r"[^a-z0-9_-]")
 _INBOX_RE = re.compile(r"^_INBOX\.([^.]+)\.")
+_CONTRACT_RE = re.compile(r"^[0-9]+\.[0-9]+\Z")
 
 
 def sanitize_token(s: str) -> str:
@@ -40,16 +41,16 @@ def root(scope: str, service: str) -> str:
     return f"{scope}.svc.{service}"
 
 
-def meta_info(root: str) -> str:
-    return f"{root}.meta.info"
+def meta_info(svc_root: str) -> str:
+    return f"{svc_root}.meta.info"
 
 
-def heartbeat(root: str) -> str:
-    return f"{root}.heartbeat"
+def heartbeat(svc_root: str) -> str:
+    return f"{svc_root}.heartbeat"
 
 
-def event(root: str, name: str) -> str:
-    return f"{root}.events.{name}"
+def event(svc_root: str, name: str) -> str:
+    return f"{svc_root}.events.{name}"
 
 
 def discover(scope: str) -> str:
@@ -64,12 +65,12 @@ def session_subject(priv_root: str, token: str) -> str:
     return f"{priv_root}.session.{token}"
 
 
-def rpc_subject(session_subject: str, action: str) -> str:
-    return f"{session_subject}.rpc.{action}"
+def rpc_subject(sess_subject: str, action: str) -> str:
+    return f"{sess_subject}.rpc.{action}"
 
 
-def stream_subject(session_subject: str, stream_id: str) -> str:
-    return f"{session_subject}.stream.{stream_id}"
+def stream_subject(sess_subject: str, stream_id: str) -> str:
+    return f"{sess_subject}.stream.{stream_id}"
 
 
 def delivery_root(client_priv_root: str, delivery_token: str) -> str:
@@ -90,6 +91,8 @@ def prefix_of_inbox(reply_subject: str) -> str | None:
 
 
 def _parse_contract(c: str) -> tuple[int, int]:
+    if not isinstance(c, str) or not _CONTRACT_RE.fullmatch(c):
+        raise ValueError(f"invalid contract: {c!r}")
     major, minor = c.split(".")
     return int(major), int(minor)
 

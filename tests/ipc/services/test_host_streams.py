@@ -84,19 +84,21 @@ def test_stream_chunks_in_order_and_final(broker_url):
         host = _host()
         got, done = _recorder(host)
         svc, cli = await _start(broker_url, host)
-        subj, _ = await _auth(host, cli)
-        opened = await cli.request_private(
-            P.rpc_subject(subj, "stream.open"), {"kind": "bytes", "params": {"rate": 16000}}
-        )
-        sid = opened["stream_id"]
-        assert host.streams[sid].params == {"rate": 16000}
-        for i in range(20):
-            await _chunk(cli, subj, sid, i, bytes([i]) * 3, final=(i == 19))
-        await asyncio.wait_for(done.wait(), 3)
-        gone = sid not in host.streams
-        bad_open = await cli.request_private(P.rpc_subject(subj, "stream.open"), {"kind": "zz"})
-        await _stop(host, svc, cli)
-        return opened, sid, got, gone, bad_open, host
+        try:
+            subj, _ = await _auth(host, cli)
+            opened = await cli.request_private(
+                P.rpc_subject(subj, "stream.open"), {"kind": "bytes", "params": {"rate": 16000}}
+            )
+            sid = opened["stream_id"]
+            assert host.streams[sid].params == {"rate": 16000}
+            for i in range(20):
+                await _chunk(cli, subj, sid, i, bytes([i]) * 3, final=(i == 19))
+            await asyncio.wait_for(done.wait(), 3)
+            gone = sid not in host.streams
+            bad_open = await cli.request_private(P.rpc_subject(subj, "stream.open"), {"kind": "zz"})
+            return opened, sid, got, gone, bad_open, host
+        finally:
+            await _stop(host, svc, cli)
 
     opened, sid, got, gone, bad_open, host = asyncio.run(go())
     assert opened["status"] == "ok" and opened["contract_version"] == CONTRACT
@@ -114,16 +116,22 @@ def test_stream_close_delivers_final_after_pending_chunks(broker_url):
         host = _host()
         got, done = _recorder(host)
         svc, cli = await _start(broker_url, host)
-        subj, _ = await _auth(host, cli)
-        sid = (await cli.request_private(P.rpc_subject(subj, "stream.open"), {"kind": "bytes"}))[
-            "stream_id"
-        ]
-        for i in range(5):
-            await _chunk(cli, subj, sid, i, b"ab")
-        closed = await cli.request_private(P.rpc_subject(subj, "stream.close"), {"stream_id": sid})
-        again = await cli.request_private(P.rpc_subject(subj, "stream.close"), {"stream_id": sid})
-        await _stop(host, svc, cli)
-        return got, closed, again
+        try:
+            subj, _ = await _auth(host, cli)
+            sid = (
+                await cli.request_private(P.rpc_subject(subj, "stream.open"), {"kind": "bytes"})
+            )["stream_id"]
+            for i in range(5):
+                await _chunk(cli, subj, sid, i, b"ab")
+            closed = await cli.request_private(
+                P.rpc_subject(subj, "stream.close"), {"stream_id": sid}
+            )
+            again = await cli.request_private(
+                P.rpc_subject(subj, "stream.close"), {"stream_id": sid}
+            )
+            return got, closed, again
+        finally:
+            await _stop(host, svc, cli)
 
     got, closed, again = asyncio.run(go())
     assert closed["status"] == "ok"
@@ -137,15 +145,17 @@ def test_stream_gap_counted(broker_url, caplog):
         host = _host()
         got, done = _recorder(host)
         svc, cli = await _start(broker_url, host)
-        subj, _ = await _auth(host, cli)
-        sid = (await cli.request_private(P.rpc_subject(subj, "stream.open"), {"kind": "bytes"}))[
-            "stream_id"
-        ]
-        await _chunk(cli, subj, sid, 0, b"a")
-        await _chunk(cli, subj, sid, 2, b"c", final=True)
-        await asyncio.wait_for(done.wait(), 3)
-        await _stop(host, svc, cli)
-        return host, got
+        try:
+            subj, _ = await _auth(host, cli)
+            sid = (
+                await cli.request_private(P.rpc_subject(subj, "stream.open"), {"kind": "bytes"})
+            )["stream_id"]
+            await _chunk(cli, subj, sid, 0, b"a")
+            await _chunk(cli, subj, sid, 2, b"c", final=True)
+            await asyncio.wait_for(done.wait(), 3)
+            return host, got
+        finally:
+            await _stop(host, svc, cli)
 
     with caplog.at_level("WARNING"):
         host, got = asyncio.run(go())
@@ -161,25 +171,29 @@ def test_stream_idle_dropped(broker_url, caplog):
         host = _host(clock=clock)
         got, _ = _recorder(host)
         svc, cli = await _start(broker_url, host)
-        subj, _ = await _auth(host, cli)
-        sid = (await cli.request_private(P.rpc_subject(subj, "stream.open"), {"kind": "bytes"}))[
-            "stream_id"
-        ]
-        await _chunk(cli, subj, sid, 0, b"a")
-        await cli.request_private(P.rpc_subject(subj, "session.ping"), {})  # orders the chunk
-        clock.t += P.STREAM_IDLE_S - 1
-        await asyncio.sleep(0.3)
-        alive = sid in host.streams
-        clock.t += 2
-        for _ in range(30):
-            if sid not in host.streams:
-                break
-            await asyncio.sleep(0.1)
-        dropped = sid not in host.streams
-        await _chunk(cli, subj, sid, 1, b"b")
-        close = await cli.request_private(P.rpc_subject(subj, "stream.close"), {"stream_id": sid})
-        await _stop(host, svc, cli)
-        return alive, dropped, got, close
+        try:
+            subj, _ = await _auth(host, cli)
+            sid = (
+                await cli.request_private(P.rpc_subject(subj, "stream.open"), {"kind": "bytes"})
+            )["stream_id"]
+            await _chunk(cli, subj, sid, 0, b"a")
+            await cli.request_private(P.rpc_subject(subj, "session.ping"), {})  # orders the chunk
+            clock.t += P.STREAM_IDLE_S - 1
+            await asyncio.sleep(0.3)
+            alive = sid in host.streams
+            clock.t += 2
+            for _ in range(30):
+                if sid not in host.streams:
+                    break
+                await asyncio.sleep(0.1)
+            dropped = sid not in host.streams
+            await _chunk(cli, subj, sid, 1, b"b")
+            close = await cli.request_private(
+                P.rpc_subject(subj, "stream.close"), {"stream_id": sid}
+            )
+            return alive, dropped, got, close
+        finally:
+            await _stop(host, svc, cli)
 
     with caplog.at_level("INFO"):
         alive, dropped, got, close = asyncio.run(go())
@@ -190,19 +204,52 @@ def test_stream_idle_dropped(broker_url, caplog):
     assert "idle" in caplog.text
 
 
+def test_stale_chunk_does_not_refresh_idle_timer(broker_url):
+    clock = FakeClock()
+
+    async def go():
+        host = _host(clock=clock)
+        _recorder(host)
+        svc, cli = await _start(broker_url, host)
+        try:
+            subj, _ = await _auth(host, cli)
+            sid = (
+                await cli.request_private(P.rpc_subject(subj, "stream.open"), {"kind": "bytes"})
+            )["stream_id"]
+            await _chunk(cli, subj, sid, 0, b"a")
+            await cli.request_private(P.rpc_subject(subj, "session.ping"), {})
+            clock.t += P.STREAM_IDLE_S - 1
+            await _chunk(cli, subj, sid, 0, b"dup")
+            await cli.request_private(P.rpc_subject(subj, "session.ping"), {})
+            last_chunk = host.streams[sid].last_chunk
+            clock.t += 2
+            for _ in range(30):
+                if sid not in host.streams:
+                    break
+                await asyncio.sleep(0.05)
+            return last_chunk, sid not in host.streams
+        finally:
+            await _stop(host, svc, cli)
+
+    last_chunk, dropped = asyncio.run(go())
+    assert last_chunk == 1000.0
+    assert dropped
+
+
 def test_session_end_drops_streams(broker_url):
     async def go():
         host = _host()
         _recorder(host)
         svc, cli = await _start(broker_url, host)
-        subj, _ = await _auth(host, cli)
-        sid = (await cli.request_private(P.rpc_subject(subj, "stream.open"), {"kind": "bytes"}))[
-            "stream_id"
-        ]
-        await cli.request_private(P.rpc_subject(subj, "session.close"), {})
-        gone = sid not in host.streams
-        await _stop(host, svc, cli)
-        return gone
+        try:
+            subj, _ = await _auth(host, cli)
+            sid = (
+                await cli.request_private(P.rpc_subject(subj, "stream.open"), {"kind": "bytes"})
+            )["stream_id"]
+            await cli.request_private(P.rpc_subject(subj, "session.close"), {})
+            return sid not in host.streams
+        finally:
+            await _stop(host, svc, cli)
 
     assert asyncio.run(go())
 
@@ -220,34 +267,34 @@ def test_emit_reaches_only_delivery_root(broker_url):
         svc, cli_a = await _start(broker_url, host)
         cli_b = NatsCore(broker_url)
         await cli_b.connect()
-        subj_a, dr_a = await _auth(host, cli_a)
-        subj_b, dr_b = await _auth(host, cli_b)
-        await cli_a.request_private(P.rpc_subject(subj_a, "whoami"), {"who": "a"})
-        await cli_b.request_private(P.rpc_subject(subj_b, "whoami"), {"who": "b"})
-
-        a_msgs, b_msgs, spy_msgs, pub_msgs = [], [], [], []
-
-        async def rec(lst, m):
-            lst.append(m)
-
-        await cli_a.subscribe(f"{dr_a}.>", functools.partial(rec, a_msgs))
-        await cli_b.subscribe(f"{dr_b}.>", functools.partial(rec, b_msgs))
         spy = NatsCore(broker_url)
         await spy.connect()
-        await spy.subscribe("_PRIV.>", functools.partial(rec, spy_msgs))
-        await spy.subscribe(f"{SCOPE}.>", functools.partial(rec, pub_msgs))
-        for c in (cli_a, cli_b, spy):
-            await c.flush()
+        try:
+            subj_a, dr_a = await _auth(host, cli_a)
+            subj_b, dr_b = await _auth(host, cli_b)
+            await cli_a.request_private(P.rpc_subject(subj_a, "whoami"), {"who": "a"})
+            await cli_b.request_private(P.rpc_subject(subj_b, "whoami"), {"who": "b"})
 
-        await host.emit(sessions["a"], "note", {"text": "hi"})
-        await host.emit(sessions["a"], "note", {"text": "again"})
-        await host.emit_chunk(sessions["a"], "s1", 0, b"\x00\x01", final=True)
-        await svc.flush()
-        await asyncio.sleep(0.3)
-        await host.stop()
-        for c in (svc, cli_a, cli_b, spy):
-            await c.close()
-        return host, dr_a, a_msgs, b_msgs, spy_msgs, pub_msgs
+            a_msgs, b_msgs, spy_msgs, pub_msgs = [], [], [], []
+
+            async def rec(lst, m):
+                lst.append(m)
+
+            await cli_a.subscribe(f"{dr_a}.>", functools.partial(rec, a_msgs))
+            await cli_b.subscribe(f"{dr_b}.>", functools.partial(rec, b_msgs))
+            await spy.subscribe("_PRIV.>", functools.partial(rec, spy_msgs))
+            await spy.subscribe(f"{SCOPE}.>", functools.partial(rec, pub_msgs))
+            for c in (cli_a, cli_b, spy):
+                await c.flush()
+
+            await host.emit(sessions["a"], "note", {"text": "hi"})
+            await host.emit(sessions["a"], "note", {"text": "again"})
+            await host.emit_chunk(sessions["a"], "s1", 0, b"\x00\x01", final=True)
+            await svc.flush()
+            await asyncio.sleep(0.3)
+            return host, dr_a, a_msgs, b_msgs, spy_msgs, pub_msgs
+        finally:
+            await _stop(host, svc, cli_a, cli_b, spy)
 
     host, dr_a, a_msgs, b_msgs, spy_msgs, pub_msgs = asyncio.run(go())
     assert [m.subject for m in a_msgs] == [f"{dr_a}.note", f"{dr_a}.note", f"{dr_a}.stream.s1"]
@@ -281,13 +328,14 @@ def test_rpc_shutdown_stops_host(broker_url):
     async def go():
         host = _host()
         svc, cli = await _start(broker_url, host)
-        subj, _ = await _auth(host, cli)
-        serving = asyncio.create_task(host.serve_forever())
-        rep = await cli.request_private(P.rpc_subject(subj, "shutdown"), {})
-        await asyncio.wait_for(serving, 3)
-        await svc.close()
-        await cli.close()
-        return rep, host
+        try:
+            subj, _ = await _auth(host, cli)
+            serving = asyncio.create_task(host.serve_forever())
+            rep = await cli.request_private(P.rpc_subject(subj, "shutdown"), {})
+            await asyncio.wait_for(serving, 3)
+            return rep, host
+        finally:
+            await _stop(host, svc, cli)
 
     rep, host = asyncio.run(go())
     assert rep["status"] == "ok"
@@ -305,24 +353,27 @@ def test_single_instance_in_process(broker_url):
 
     async def go():
         first = _host(scope=scope, single_instance=True)
+        second = _host(scope=scope, single_instance=True)
+        lax = _host(scope=scope, single_instance=False)
+        third = _host(scope=scope, single_instance=True)
         svc1 = NatsCore(broker_url)
         await svc1.connect()
-        await first.start(svc1)
-        second = _host(scope=scope, single_instance=True)
         svc2 = NatsCore(broker_url)
         await svc2.connect()
-        with pytest.raises(InstanceConflictError) as ei:
-            await second.start(svc2)
-        lax = _host(scope=scope, single_instance=False)
-        await lax.start(svc2)  # opt-out skips the check
-        await lax.stop()
-        await first.stop()
-        third = _host(scope=scope, single_instance=True)
-        await third.start(svc2)  # the stopped host's final "stopping" beat does not count
-        await third.stop()
-        await svc1.close()
-        await svc2.close()
-        return ei.value
+        try:
+            await first.start(svc1)
+            with pytest.raises(InstanceConflictError) as ei:
+                await second.start(svc2)
+            await lax.start(svc2)  # opt-out skips the check
+            await lax.stop()
+            await first.stop()
+            await third.start(svc2)  # the stopped host's final "stopping" beat does not count
+            return ei.value
+        finally:
+            for h in (lax, first, third):
+                await h.stop()
+            await svc1.close()
+            await svc2.close()
 
     err = asyncio.run(go())
     assert str(err) == f"another instance is already serving {P.root(scope, 'echo')}"

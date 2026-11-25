@@ -272,3 +272,24 @@ def test_restart_child_kills_and_respawns(tmp_path):
 
     asyncio.run(main())
     assert len(exits) == 1
+
+
+def test_stop_drains_final_child_output_before_cancelling_pumps(tmp_path, monkeypatch):
+    orig_pump = LocalLauncher._pump
+
+    async def slow_pump(self, stream, is_err):
+        await asyncio.sleep(0.2)
+        await orig_pump(self, stream, is_err)
+
+    monkeypatch.setattr(LocalLauncher, "_pump", slow_pump)
+    code = "import sys; sys.stdin.read(); sys.stderr.write('final-line\\n'); sys.stderr.flush()"
+
+    async def main():
+        la = LocalLauncher(_py(code), session_token="t", log_path=tmp_path / "log.txt")
+        await la.start()
+        await la.stop(None, grace_s=5.0)
+        return la.last_stderr
+
+    stderr = asyncio.run(main())
+    assert "final-line" in stderr
+    assert "final-line" in (tmp_path / "log.txt").read_text()

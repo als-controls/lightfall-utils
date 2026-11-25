@@ -72,7 +72,14 @@ def run_service(host: ServiceHost, argv: list[str] | None = None) -> int:
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return EXIT_USAGE
-    return asyncio.run(_serve(host, args))
+    except KeyboardInterrupt:
+        log.error("%s interrupted during startup", host.name)
+        return EXIT_FAILED
+    try:
+        return asyncio.run(_serve(host, args))
+    except KeyboardInterrupt:
+        log.error("%s interrupted during startup", host.name)
+        return EXIT_FAILED
 
 
 async def _serve(host: ServiceHost, args: argparse.Namespace) -> int:
@@ -104,6 +111,9 @@ async def _serve(host: ServiceHost, args: argparse.Namespace) -> int:
         except InstanceConflictError as e:
             print(f"error: {e}", file=sys.stderr)
             return EXIT_CONFLICT
+        except Exception as e:
+            log.error("startup failed: %s", e)
+            return EXIT_FAILED
         if host.state == "starting" and host.auto_ready:
             host.state = "ready"
         log.info("%s serving %s (instance %s)", host.name, host.root, host.instance_id)

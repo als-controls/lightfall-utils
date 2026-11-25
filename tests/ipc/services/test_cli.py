@@ -85,11 +85,13 @@ def test_stdin_eof_exits(broker_url):
         async def go():
             cli = NatsCore(broker_url)
             await cli.connect()
-            info = await _wait_ready(cli, scope)
-            wrong = await _auth(cli, info)
-            right = await _auth(cli, info, session_token=secret)
-            await cli.close()
-            return wrong, right
+            try:
+                info = await _wait_ready(cli, scope)
+                wrong = await _auth(cli, info)
+                right = await _auth(cli, info, session_token=secret)
+                return wrong, right
+            finally:
+                await cli.close()
 
         wrong, right = asyncio.run(go())
         assert wrong["code"] == "denied"
@@ -111,13 +113,15 @@ def test_rpc_shutdown_exits(broker_url):
         async def go():
             cli = NatsCore(broker_url)
             await cli.connect()
-            info = await _wait_ready(cli, scope)
-            subj = (await _auth(cli, info))["session_subject"]
-            echoed = await cli.request_private(P.rpc_subject(subj, "echo"), {"v": 1})
-            slow = await cli.request_private(P.rpc_subject(subj, "slow"), {"seconds": 0.1})
-            rep = await cli.request_private(P.rpc_subject(subj, "shutdown"), {})
-            await cli.close()
-            return echoed, slow, rep
+            try:
+                info = await _wait_ready(cli, scope)
+                subj = (await _auth(cli, info))["session_subject"]
+                echoed = await cli.request_private(P.rpc_subject(subj, "echo"), {"v": 1})
+                slow = await cli.request_private(P.rpc_subject(subj, "slow"), {"seconds": 0.1})
+                rep = await cli.request_private(P.rpc_subject(subj, "shutdown"), {})
+                return echoed, slow, rep
+            finally:
+                await cli.close()
 
         echoed, slow, rep = asyncio.run(go())
         assert echoed["echo"] == {"v": 1}
@@ -137,8 +141,10 @@ def test_sigterm_exits(broker_url):
         async def go():
             cli = NatsCore(broker_url)
             await cli.connect()
-            await _wait_ready(cli, scope)
-            await cli.close()
+            try:
+                await _wait_ready(cli, scope)
+            finally:
+                await cli.close()
 
         asyncio.run(go())
         proc.send_signal(signal.SIGTERM)
@@ -156,8 +162,10 @@ def test_single_instance_refusal(broker_url):
         async def go():
             cli = NatsCore(broker_url)
             await cli.connect()
-            await _wait_ready(cli, scope)
-            await cli.close()
+            try:
+                await _wait_ready(cli, scope)
+            finally:
+                await cli.close()
 
         asyncio.run(go())
         second = _spawn(broker_url, scope)
@@ -179,42 +187,44 @@ def test_echo_bytes_stream_emits_total(broker_url):
         svc, cli = NatsCore(broker_url), NatsCore(broker_url)
         await svc.connect()
         await cli.connect()
-        await host.start(svc)
-        dt = new_token()
-        rep = await cli.request_private(
-            P.auth_subject(host.priv_root),
-            {
-                "app_name": "t",
-                "app_version": "1",
-                "delivery_token": dt,
-                "client_priv_root": cli.priv_root,
-            },
-        )
-        dr = P.delivery_root(cli.priv_root, dt)
-        got = asyncio.get_running_loop().create_future()
-
-        async def on_total(msg):
-            if not got.done():
-                got.set_result((msg.subject, msg.data))
-
-        await cli.subscribe(f"{dr}.>", on_total)
-        await cli.flush()
-        subj = rep["session_subject"]
-        sid = (await cli.request_private(P.rpc_subject(subj, "stream.open"), {"kind": "bytes"}))[
-            "stream_id"
-        ]
-        for i in range(4):
-            await cli.publish(
-                P.stream_subject(subj, sid),
-                b"x" * 10,
-                headers={P.HDR_SEQ: str(i), P.HDR_KIND: "bytes", P.HDR_FINAL: "0"},
+        try:
+            await host.start(svc)
+            dt = new_token()
+            rep = await cli.request_private(
+                P.auth_subject(host.priv_root),
+                {
+                    "app_name": "t",
+                    "app_version": "1",
+                    "delivery_token": dt,
+                    "client_priv_root": cli.priv_root,
+                },
             )
-        await cli.request_private(P.rpc_subject(subj, "stream.close"), {"stream_id": sid})
-        subject, data = await asyncio.wait_for(got, 3)
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return dr, sid, subject, data
+            dr = P.delivery_root(cli.priv_root, dt)
+            got = asyncio.get_running_loop().create_future()
+
+            async def on_total(msg):
+                if not got.done():
+                    got.set_result((msg.subject, msg.data))
+
+            await cli.subscribe(f"{dr}.>", on_total)
+            await cli.flush()
+            subj = rep["session_subject"]
+            sid = (
+                await cli.request_private(P.rpc_subject(subj, "stream.open"), {"kind": "bytes"})
+            )["stream_id"]
+            for i in range(4):
+                await cli.publish(
+                    P.stream_subject(subj, sid),
+                    b"x" * 10,
+                    headers={P.HDR_SEQ: str(i), P.HDR_KIND: "bytes", P.HDR_FINAL: "0"},
+                )
+            await cli.request_private(P.rpc_subject(subj, "stream.close"), {"stream_id": sid})
+            subject, data = await asyncio.wait_for(got, 3)
+            return dr, sid, subject, data
+        finally:
+            await host.stop()
+            await svc.close()
+            await cli.close()
 
     dr, sid, subject, data = asyncio.run(go())
     assert subject == f"{dr}.stream_total"
@@ -258,9 +268,7 @@ def test_external_service_exits_1_when_broker_connection_closes(broker_url, monk
     async def start(core):
         await orig_start(core)
         # Simulate nats-py giving up on reconnecting: it calls closed_cb.
-        asyncio.get_running_loop().call_later(
-            0.3, lambda: asyncio.ensure_future(core._wrap(spy.kwargs["on_closed"], "closed")())
-        )
+        asyncio.get_running_loop().call_later(0.3, spy.kwargs["on_closed"])
 
     host.start = start
     t0 = time.monotonic()
@@ -268,6 +276,43 @@ def test_external_service_exits_1_when_broker_connection_closes(broker_url, monk
     assert rc == 1
     assert time.monotonic() - t0 < 10
     assert spy.kwargs["max_reconnect_attempts"] == 60
+
+
+def test_run_service_ctrl_c_during_startup_logs_one_line_and_exits_nonzero(
+    broker_url, monkeypatch, caplog, capsys
+):
+    host = make_host(_scope())
+
+    async def interrupted_start(core):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(host, "start", interrupted_start)
+    with caplog.at_level("INFO"):
+        rc = run_service(host, ["--nats-url", broker_url])
+    err = capsys.readouterr().err
+    assert rc != 0
+    assert "Traceback" not in err
+    assert len(caplog.records) == 1
+    assert not caplog.records[0].exc_info
+
+
+def test_run_service_startup_exception_logs_one_line_and_exits_nonzero(
+    broker_url, monkeypatch, caplog, capsys
+):
+    host = make_host(_scope(), single_instance=False)
+
+    async def broken_start(core):
+        raise RuntimeError("probe boom")
+
+    monkeypatch.setattr(host, "start", broken_start)
+    with caplog.at_level("ERROR"):
+        rc = run_service(host, ["--nats-url", broker_url])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "Traceback" not in err
+    assert len(caplog.records) == 1
+    assert "probe boom" in caplog.records[0].getMessage()
+    assert not caplog.records[0].exc_info
 
 
 def test_local_service_reconnects_forever(broker_url, monkeypatch):

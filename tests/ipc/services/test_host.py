@@ -76,10 +76,12 @@ def test_meta_info_and_discover_carry_priv_root(broker_url):
     async def go():
         host = _host()
         svc, cli = await _pair(broker_url, host)
-        info = await cli.request_public(P.meta_info(P.root(SCOPE, "echo")), {})
-        disc = await cli.request_public(P.discover(SCOPE), {})
-        await _teardown(host, svc, cli)
-        return host, svc, info, disc
+        try:
+            info = await cli.request_public(P.meta_info(P.root(SCOPE, "echo")), {})
+            disc = await cli.request_public(P.discover(SCOPE), {})
+            return host, svc, info, disc
+        finally:
+            await _teardown(host, svc, cli)
 
     host, svc, info, disc = asyncio.run(go())
     for d in (info, disc):
@@ -97,25 +99,26 @@ def test_heartbeat_payload_fields(broker_url):
         host = _host()
         host.summary = {"jobs": 3}
         cli = NatsCore(broker_url)
-        await cli.connect()
-        beats = []
-        two = asyncio.get_running_loop().create_future()
-
-        async def cb(msg):
-            beats.append(json.loads(msg.data))
-            if len(beats) >= 2 and not two.done():
-                two.set_result(None)
-
-        await cli.subscribe(P.heartbeat(P.root(SCOPE, "echo")), cb)
-        await cli.flush()
         svc = NatsCore(broker_url)
+        await cli.connect()
         await svc.connect()
-        await host.start(svc)
-        host.state = "ready"
-        await asyncio.wait_for(two, 3)
-        got = list(beats)
-        await _teardown(host, svc, cli)
-        return host, got
+        try:
+            beats = []
+            two = asyncio.get_running_loop().create_future()
+
+            async def cb(msg):
+                beats.append(json.loads(msg.data))
+                if len(beats) >= 2 and not two.done():
+                    two.set_result(None)
+
+            await cli.subscribe(P.heartbeat(P.root(SCOPE, "echo")), cb)
+            await cli.flush()
+            await host.start(svc)
+            host.state = "ready"
+            await asyncio.wait_for(two, 3)
+            return host, list(beats)
+        finally:
+            await _teardown(host, svc, cli)
 
     host, beats = asyncio.run(go())
     assert len(beats) >= 2
@@ -142,15 +145,17 @@ def test_auth_approves_and_rpc_roundtrip(broker_url):
             return {"sync": payload["v"]}
 
         svc, cli = await _pair(broker_url, host)
-        auth = _auth_payload(cli)
-        rep = await cli.request_private(P.auth_subject(host.priv_root), auth)
-        subj = rep["session_subject"]
-        out = await cli.request_private(P.rpc_subject(subj, "echo"), {"v": 5})
-        out2 = await cli.request_private(P.rpc_subject(subj, "sync_echo"), {"v": 6})
-        ping = await cli.request_private(P.rpc_subject(subj, "session.ping"), {})
-        unknown = await cli.request_private(P.rpc_subject(subj, "nope"), {})
-        await _teardown(host, svc, cli)
-        return host, cli, auth, rep, out, out2, ping, unknown, seen
+        try:
+            auth = _auth_payload(cli)
+            rep = await cli.request_private(P.auth_subject(host.priv_root), auth)
+            subj = rep["session_subject"]
+            out = await cli.request_private(P.rpc_subject(subj, "echo"), {"v": 5})
+            out2 = await cli.request_private(P.rpc_subject(subj, "sync_echo"), {"v": 6})
+            ping = await cli.request_private(P.rpc_subject(subj, "session.ping"), {})
+            unknown = await cli.request_private(P.rpc_subject(subj, "nope"), {})
+            return host, cli, auth, rep, out, out2, ping, unknown, seen
+        finally:
+            await _teardown(host, svc, cli)
 
     host, cli, auth, rep, out, out2, ping, unknown, seen = asyncio.run(go())
     assert rep["status"] == "approved"
@@ -173,11 +178,13 @@ def test_auth_refuses_mismatched_client_priv_root(broker_url):
     async def go():
         host = _host()
         svc, cli = await _pair(broker_url, host)
-        other = NatsCore(broker_url)  # never connected; just a different, valid priv_root
-        bad_shape = await _auth(host, cli, client_priv_root="_PRIV.NOTVALID")
-        mismatch = await _auth(host, cli, client_priv_root=other.priv_root)
-        await _teardown(host, svc, cli)
-        return bad_shape, mismatch
+        try:
+            other = NatsCore(broker_url)  # never connected; just a different, valid priv_root
+            bad_shape = await _auth(host, cli, client_priv_root="_PRIV.NOTVALID")
+            mismatch = await _auth(host, cli, client_priv_root=other.priv_root)
+            return bad_shape, mismatch
+        finally:
+            await _teardown(host, svc, cli)
 
     for rep in asyncio.run(go()):
         assert rep["status"] == "error"
@@ -189,9 +196,10 @@ def test_trust_callable_denies(broker_url):
     async def go():
         host = _host(trust=allow_apps(["someone-else"]))
         svc, cli = await _pair(broker_url, host)
-        rep = await _auth(host, cli)
-        await _teardown(host, svc, cli)
-        return rep
+        try:
+            return await _auth(host, cli)
+        finally:
+            await _teardown(host, svc, cli)
 
     rep = asyncio.run(go())
     assert rep["status"] == "error" and rep["code"] == "denied"
@@ -211,11 +219,13 @@ def test_stdin_token_required(broker_url):
     async def go():
         host = _host(stdin_token=secret)
         svc, cli = await _pair(broker_url, host)
-        wrong = await _auth(host, cli, session_token="wrong")
-        missing = await _auth(host, cli)
-        right = await _auth(host, cli, session_token=secret)
-        await _teardown(host, svc, cli)
-        return wrong, missing, right
+        try:
+            wrong = await _auth(host, cli, session_token="wrong")
+            missing = await _auth(host, cli)
+            right = await _auth(host, cli, session_token=secret)
+            return wrong, missing, right
+        finally:
+            await _teardown(host, svc, cli)
 
     wrong, missing, right = asyncio.run(go())
     assert wrong["code"] == "denied"
@@ -236,19 +246,21 @@ def test_reauth_with_stdin_token_after_lease_expiry(broker_url):
             return {"hi": True}
 
         svc, cli = await _pair(broker_url, host)
-        first = await _auth(host, cli, session_token=secret)
-        subj = first["session_subject"]
-        assert (await cli.request_private(P.rpc_subject(subj, "hi"), {}))["hi"]
-        clock.t += P.LEASE_S + 1
-        expired = None
         try:
-            await cli.request_private(P.rpc_subject(subj, "hi"), {}, timeout=0.5)
-        except NatsTimeout as e:
-            expired = e
-        again = await _auth(host, cli, session_token=secret)
-        after = await cli.request_private(P.rpc_subject(again["session_subject"], "hi"), {})
-        await _teardown(host, svc, cli)
-        return expired, again, after
+            first = await _auth(host, cli, session_token=secret)
+            subj = first["session_subject"]
+            assert (await cli.request_private(P.rpc_subject(subj, "hi"), {}))["hi"]
+            clock.t += P.LEASE_S + 1
+            expired = None
+            try:
+                await cli.request_private(P.rpc_subject(subj, "hi"), {}, timeout=0.5)
+            except NatsTimeout as e:
+                expired = e
+            again = await _auth(host, cli, session_token=secret)
+            after = await cli.request_private(P.rpc_subject(again["session_subject"], "hi"), {})
+            return expired, again, after
+        finally:
+            await _teardown(host, svc, cli)
 
     expired, again, after = asyncio.run(go())
     assert expired is not None
@@ -266,10 +278,12 @@ def test_unknown_session_token_ignored(broker_url):
             return {"hi": True}
 
         svc, cli = await _pair(broker_url, host)
-        subj = P.session_subject(host.priv_root, new_token())
-        with pytest.raises(NatsTimeout):
-            await cli.request_private(P.rpc_subject(subj, "hi"), {}, timeout=0.5)
-        await _teardown(host, svc, cli)
+        try:
+            subj = P.session_subject(host.priv_root, new_token())
+            with pytest.raises(NatsTimeout):
+                await cli.request_private(P.rpc_subject(subj, "hi"), {}, timeout=0.5)
+        finally:
+            await _teardown(host, svc, cli)
 
     asyncio.run(go())
 
@@ -287,11 +301,13 @@ def test_handler_exception_is_error_reply(broker_url, caplog):
             return {"hi": True}
 
         svc, cli = await _pair(broker_url, host)
-        subj = (await _auth(host, cli))["session_subject"]
-        err = await cli.request_private(P.rpc_subject(subj, "boom"), {})
-        ok = await cli.request_private(P.rpc_subject(subj, "hi"), {})
-        await _teardown(host, svc, cli)
-        return err, ok
+        try:
+            subj = (await _auth(host, cli))["session_subject"]
+            err = await cli.request_private(P.rpc_subject(subj, "boom"), {})
+            ok = await cli.request_private(P.rpc_subject(subj, "hi"), {})
+            return err, ok
+        finally:
+            await _teardown(host, svc, cli)
 
     with caplog.at_level("ERROR"):
         err, ok = asyncio.run(go())
@@ -315,16 +331,18 @@ def test_lease_expiry_calls_on_session_end(broker_url):
 
         host.on_session_end(on_end)
         svc, cli = await _pair(broker_url, host)
-        rep = await _auth(host, cli)
-        clock.t += P.LEASE_S - 1
-        await cli.request_private(P.rpc_subject(rep["session_subject"], "session.ping"), {})
-        clock.t += P.LEASE_S - 1  # pinged recently: still alive
-        await asyncio.sleep(0.3)
-        alive = not ended
-        clock.t += 2
-        await asyncio.wait_for(done, 3)
-        await _teardown(host, svc, cli)
-        return rep, alive, ended
+        try:
+            rep = await _auth(host, cli)
+            clock.t += P.LEASE_S - 1
+            await cli.request_private(P.rpc_subject(rep["session_subject"], "session.ping"), {})
+            clock.t += P.LEASE_S - 1  # pinged recently: still alive
+            await asyncio.sleep(0.3)
+            alive = not ended
+            clock.t += 2
+            await asyncio.wait_for(done, 3)
+            return rep, alive, ended
+        finally:
+            await _teardown(host, svc, cli)
 
     rep, alive, ended = asyncio.run(go())
     assert alive
@@ -342,13 +360,15 @@ def test_session_close_ends_session(broker_url):
             return {"hi": True}
 
         svc, cli = await _pair(broker_url, host)
-        rep = await _auth(host, cli)
-        subj = rep["session_subject"]
-        closed = await cli.request_private(P.rpc_subject(subj, "session.close"), {})
-        with pytest.raises(NatsTimeout):
-            await cli.request_private(P.rpc_subject(subj, "hi"), {}, timeout=0.5)
-        await _teardown(host, svc, cli)
-        return rep, closed, ended
+        try:
+            rep = await _auth(host, cli)
+            subj = rep["session_subject"]
+            closed = await cli.request_private(P.rpc_subject(subj, "session.close"), {})
+            with pytest.raises(NatsTimeout):
+                await cli.request_private(P.rpc_subject(subj, "hi"), {}, timeout=0.5)
+            return rep, closed, ended
+        finally:
+            await _teardown(host, svc, cli)
 
     rep, closed, ended = asyncio.run(go())
     assert closed["status"] == "ok"
@@ -360,13 +380,16 @@ def test_serve_forever_returns_after_stop(broker_url):
         host = _host()
         svc = NatsCore(broker_url)
         await svc.connect()
-        await host.start(svc)
-        task = asyncio.create_task(host.serve_forever())
-        await asyncio.sleep(0.05)
-        assert not task.done()
-        await host.stop()
-        await asyncio.wait_for(task, 2)
-        await svc.close()
+        try:
+            await host.start(svc)
+            task = asyncio.create_task(host.serve_forever())
+            await asyncio.sleep(0.05)
+            assert not task.done()
+            await host.stop()
+            await asyncio.wait_for(task, 2)
+        finally:
+            await host.stop()
+            await svc.close()
 
     asyncio.run(go())
 
@@ -381,10 +404,11 @@ def test_handler_result_with_reserved_key_is_error_reply(broker_url, key):
             return {key: "x", "other": 1}
 
         svc, cli = await _pair(broker_url, host)
-        subj = (await _auth(host, cli))["session_subject"]
-        rep = await cli.request_private(P.rpc_subject(subj, "bad"), {}, timeout=1.0)
-        await _teardown(host, svc, cli)
-        return rep
+        try:
+            subj = (await _auth(host, cli))["session_subject"]
+            return await cli.request_private(P.rpc_subject(subj, "bad"), {}, timeout=1.0)
+        finally:
+            await _teardown(host, svc, cli)
 
     rep = asyncio.run(go())
     assert rep["status"] == "error"
@@ -400,9 +424,10 @@ def test_stdin_token_non_str_denied(broker_url, bad):
     async def go():
         host = _host(stdin_token=secret)
         svc, cli = await _pair(broker_url, host)
-        rep = await _auth(host, cli, session_token=bad)
-        await _teardown(host, svc, cli)
-        return rep
+        try:
+            return await _auth(host, cli, session_token=bad)
+        finally:
+            await _teardown(host, svc, cli)
 
     rep = asyncio.run(go())
     assert rep["status"] == "error" and rep["code"] == "denied"
@@ -449,24 +474,26 @@ def test_malformed_inputs(broker_url, case):
         host.rpc("listy")(lambda s, p: [1, 2])
         host.rpc("boom")(_sync_boom)
         svc, cli = await _pair(broker_url, host)
-        subj = (await _auth(host, cli))["session_subject"]
-        nc = cli._conn()
-        if case == "auth_malformed_json":
-            msg = await nc.request(P.auth_subject(host.priv_root), b"{not json", timeout=1.0)
-            rep = json.loads(msg.data)
-        elif case == "auth_bad_delivery_token":
-            rep = await _auth(host, cli, delivery_token="a.b")
-        elif case == "rpc_non_dict":
-            rep = await cli.request_private(P.rpc_subject(subj, "listy"), [1, 2])
-        elif case == "rpc_bad_json":
-            msg = await nc.request(P.rpc_subject(subj, "listy"), b"\xff\xfe", timeout=1.0)
-            rep = json.loads(msg.data)
-        elif case == "handler_non_dict":
-            rep = await cli.request_private(P.rpc_subject(subj, "listy"), {})
-        else:
-            rep = await cli.request_private(P.rpc_subject(subj, "boom"), {})
-        await _teardown(host, svc, cli)
-        return rep
+        try:
+            subj = (await _auth(host, cli))["session_subject"]
+            nc = cli._conn()
+            if case == "auth_malformed_json":
+                msg = await nc.request(P.auth_subject(host.priv_root), b"{not json", timeout=1.0)
+                rep = json.loads(msg.data)
+            elif case == "auth_bad_delivery_token":
+                rep = await _auth(host, cli, delivery_token="a.b")
+            elif case == "rpc_non_dict":
+                rep = await cli.request_private(P.rpc_subject(subj, "listy"), [1, 2])
+            elif case == "rpc_bad_json":
+                msg = await nc.request(P.rpc_subject(subj, "listy"), b"\xff\xfe", timeout=1.0)
+                rep = json.loads(msg.data)
+            elif case == "handler_non_dict":
+                rep = await cli.request_private(P.rpc_subject(subj, "listy"), {})
+            else:
+                rep = await cli.request_private(P.rpc_subject(subj, "boom"), {})
+            return rep
+        finally:
+            await _teardown(host, svc, cli)
 
     rep = asyncio.run(go())
     expected = {

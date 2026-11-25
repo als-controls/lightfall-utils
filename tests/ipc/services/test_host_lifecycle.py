@@ -114,24 +114,26 @@ def test_slow_stream_handler_does_not_block_pings_or_rpcs(broker_url, sync_handl
             return {"hi": 1}
 
         svc, a, b = await _cores(broker_url, 3)
-        await host.start(svc)
-        subj_a, _ = await _auth(host, a)
-        subj_b, _ = await _auth(host, b)
-        sid = (await _open(a, subj_a))["stream_id"]
-        for i in range(3):
-            await _chunk(a, subj_a, sid, i, b"x")
-        await _chunk(a, subj_a, sid, 3, b"y", final=True)
-        await a.flush()
-        await asyncio.sleep(0.2)  # the final handler is now running
-        t0 = time.monotonic()
-        ping_b = await b.request_private(P.rpc_subject(subj_b, "session.ping"), {}, 1.0)
-        ping_a = await a.request_private(P.rpc_subject(subj_a, "session.ping"), {}, 1.0)
-        hi_b = await b.request_private(P.rpc_subject(subj_b, "hi"), {}, 1.0)
-        elapsed = time.monotonic() - t0
-        await _until(lambda: len(got) == 4, 5)
-        release.set()
-        await _stop(host, svc, a, b)
-        return ping_a, ping_b, hi_b, elapsed, got
+        try:
+            await host.start(svc)
+            subj_a, _ = await _auth(host, a)
+            subj_b, _ = await _auth(host, b)
+            sid = (await _open(a, subj_a))["stream_id"]
+            for i in range(3):
+                await _chunk(a, subj_a, sid, i, b"x")
+            await _chunk(a, subj_a, sid, 3, b"y", final=True)
+            await a.flush()
+            await asyncio.sleep(0.2)  # the final handler is now running
+            t0 = time.monotonic()
+            ping_b = await b.request_private(P.rpc_subject(subj_b, "session.ping"), {}, 1.0)
+            ping_a = await a.request_private(P.rpc_subject(subj_a, "session.ping"), {}, 1.0)
+            hi_b = await b.request_private(P.rpc_subject(subj_b, "hi"), {}, 1.0)
+            elapsed = time.monotonic() - t0
+            await _until(lambda: len(got) == 4, 5)
+            release.set()
+            return ping_a, ping_b, hi_b, elapsed, got
+        finally:
+            await _stop(host, svc, a, b)
 
     ping_a, ping_b, hi_b, elapsed, got = asyncio.run(go())
     assert ping_a["status"] == ping_b["status"] == hi_b["status"] == "ok"
@@ -150,17 +152,21 @@ def test_chunk_order_and_close_after_chunks_with_slow_handler(broker_url):
             got.append((seq, data, final))
 
         svc, cli = await _cores(broker_url, 2)
-        await host.start(svc)
-        subj, _ = await _auth(host, cli)
-        sid = (await _open(cli, subj))["stream_id"]
-        for i in range(10):
-            await _chunk(cli, subj, sid, i, bytes([i]))
-        t0 = time.monotonic()
-        closed = await cli.request_private(P.rpc_subject(subj, "stream.close"), {"stream_id": sid})
-        close_s = time.monotonic() - t0
-        await _until(lambda: got and got[-1][2], 3)
-        await _stop(host, svc, cli)
-        return got, closed, close_s
+        try:
+            await host.start(svc)
+            subj, _ = await _auth(host, cli)
+            sid = (await _open(cli, subj))["stream_id"]
+            for i in range(10):
+                await _chunk(cli, subj, sid, i, bytes([i]))
+            t0 = time.monotonic()
+            closed = await cli.request_private(
+                P.rpc_subject(subj, "stream.close"), {"stream_id": sid}
+            )
+            close_s = time.monotonic() - t0
+            await _until(lambda: got and got[-1][2], 3)
+            return got, closed, close_s
+        finally:
+            await _stop(host, svc, cli)
 
     got, closed, close_s = asyncio.run(go())
     assert closed["status"] == "ok"
@@ -211,20 +217,26 @@ def test_rpc_opened_stream_accepts_chunks_without_kind_and_busy(broker_url):
     async def go():
         host, got, ended = _voice_like_host()
         svc, cli = await _cores(broker_url, 2)
-        await host.start(svc)
-        subj, _ = await _auth(host, cli)
-        start = await cli.request_private(P.rpc_subject(subj, "utterance.start"), {"rate": 16000})
-        sid = start["stream_id"]
-        params = host.streams[sid].params
-        busy = await cli.request_private(P.rpc_subject(subj, "utterance.start"), {})
-        await _chunk(cli, subj, sid, 0, b"a", kind=None)  # header absent
-        await _chunk(cli, subj, sid, 1, b"b", kind="")  # header empty
-        await _chunk(cli, subj, sid, 2, b"c", kind="audio")
-        await _chunk(cli, subj, sid, 3, b"d", kind="other")  # wrong kind: dropped
-        stop = await cli.request_private(P.rpc_subject(subj, "utterance.stop"), {"stream_id": sid})
-        await _until(lambda: ended, 3)
-        again = await cli.request_private(P.rpc_subject(subj, "utterance.start"), {})
-        await _stop(host, svc, cli)
+        try:
+            await host.start(svc)
+            subj, _ = await _auth(host, cli)
+            start = await cli.request_private(
+                P.rpc_subject(subj, "utterance.start"), {"rate": 16000}
+            )
+            sid = start["stream_id"]
+            params = host.streams[sid].params
+            busy = await cli.request_private(P.rpc_subject(subj, "utterance.start"), {})
+            await _chunk(cli, subj, sid, 0, b"a", kind=None)  # header absent
+            await _chunk(cli, subj, sid, 1, b"b", kind="")  # header empty
+            await _chunk(cli, subj, sid, 2, b"c", kind="audio")
+            await _chunk(cli, subj, sid, 3, b"d", kind="other")  # wrong kind: dropped
+            stop = await cli.request_private(
+                P.rpc_subject(subj, "utterance.stop"), {"stream_id": sid}
+            )
+            await _until(lambda: ended, 3)
+            again = await cli.request_private(P.rpc_subject(subj, "utterance.start"), {})
+        finally:
+            await _stop(host, svc, cli)
         return sid, params, busy, stop, got, ended, again
 
     sid, params, busy, stop, got, ended, again = asyncio.run(go())
@@ -246,22 +258,26 @@ def test_end_stream_cancel_drops_without_final(broker_url):
     async def go():
         host, got, ended = _voice_like_host()
         svc, cli = await _cores(broker_url, 2)
-        await host.start(svc)
-        subj, _ = await _auth(host, cli)
-        sid = (await cli.request_private(P.rpc_subject(subj, "utterance.start"), {}))["stream_id"]
-        await _chunk(cli, subj, sid, 0, b"a", kind=None)
-        await cli.request_private(P.rpc_subject(subj, "session.ping"), {})  # orders the chunk
-        await _until(lambda: got, 3)
-        cancel = await cli.request_private(
-            P.rpc_subject(subj, "utterance.cancel"), {"stream_id": sid}
-        )
-        await _chunk(cli, subj, sid, 1, b"b", kind=None)
-        twice = await cli.request_private(
-            P.rpc_subject(subj, "utterance.cancel"), {"stream_id": sid}
-        )
-        await asyncio.sleep(0.2)
-        await _stop(host, svc, cli)
-        return sid, got, ended, cancel, twice
+        try:
+            await host.start(svc)
+            subj, _ = await _auth(host, cli)
+            sid = (await cli.request_private(P.rpc_subject(subj, "utterance.start"), {}))[
+                "stream_id"
+            ]
+            await _chunk(cli, subj, sid, 0, b"a", kind=None)
+            await cli.request_private(P.rpc_subject(subj, "session.ping"), {})  # orders the chunk
+            await _until(lambda: got, 3)
+            cancel = await cli.request_private(
+                P.rpc_subject(subj, "utterance.cancel"), {"stream_id": sid}
+            )
+            await _chunk(cli, subj, sid, 1, b"b", kind=None)
+            twice = await cli.request_private(
+                P.rpc_subject(subj, "utterance.cancel"), {"stream_id": sid}
+            )
+            await asyncio.sleep(0.2)
+            return sid, got, ended, cancel, twice
+        finally:
+            await _stop(host, svc, cli)
 
     sid, got, ended, cancel, twice = asyncio.run(go())
     assert cancel["ended"] is True and twice["ended"] is False
@@ -282,19 +298,21 @@ def test_on_stream_end_reasons_final_idle_session_end(broker_url):
 
         host.on_stream_end(lambda session, sid, reason: ended.append((sid, reason)))
         svc, cli = await _cores(broker_url, 2)
-        await host.start(svc)
-        subj, _ = await _auth(host, cli)
-        s_final = (await _open(cli, subj))["stream_id"]
-        s_idle = (await _open(cli, subj))["stream_id"]
-        await _chunk(cli, subj, s_final, 0, b"z", final=True)
-        await _until(lambda: (s_final, "final") in ended, 3)
-        clock.t += P.STREAM_IDLE_S + 1
-        await _until(lambda: (s_idle, "idle") in ended, 3)
-        s_sess = (await _open(cli, subj))["stream_id"]
-        await cli.request_private(P.rpc_subject(subj, "session.close"), {})
-        await _until(lambda: (s_sess, "session_end") in ended, 3)
-        await _stop(host, svc, cli)
-        return ended
+        try:
+            await host.start(svc)
+            subj, _ = await _auth(host, cli)
+            s_final = (await _open(cli, subj))["stream_id"]
+            s_idle = (await _open(cli, subj))["stream_id"]
+            await _chunk(cli, subj, s_final, 0, b"z", final=True)
+            await _until(lambda: (s_final, "final") in ended, 3)
+            clock.t += P.STREAM_IDLE_S + 1
+            await _until(lambda: (s_idle, "idle") in ended, 3)
+            s_sess = (await _open(cli, subj))["stream_id"]
+            await cli.request_private(P.rpc_subject(subj, "session.close"), {})
+            await _until(lambda: (s_sess, "session_end") in ended, 3)
+            return ended
+        finally:
+            await _stop(host, svc, cli)
 
     ended = asyncio.run(go())
     assert len(ended) == 3  # each stream ends exactly once
@@ -315,12 +333,14 @@ def test_on_open_validator_refuses_stream_open(broker_url):
             pass
 
         svc, cli = await _cores(broker_url, 2)
-        await host.start(svc)
-        subj, _ = await _auth(host, cli)
-        first = await _open(cli, subj, params={"n": 1})
-        second = await _open(cli, subj, params={"n": 2})
-        await _stop(host, svc, cli)
-        return first, second, seen
+        try:
+            await host.start(svc)
+            subj, _ = await _auth(host, cli)
+            first = await _open(cli, subj, params={"n": 1})
+            second = await _open(cli, subj, params={"n": 2})
+            return first, second, seen
+        finally:
+            await _stop(host, svc, cli)
 
     first, second, seen = asyncio.run(go())
     assert first["status"] == "ok"
@@ -342,15 +362,17 @@ def test_end_stream_from_inside_its_handler(broker_url):
 
         host.on_stream_end(lambda s, sid, reason: ended.append(reason))
         svc, cli = await _cores(broker_url, 2)
-        await host.start(svc)
-        subj, _ = await _auth(host, cli)
-        sid = (await _open(cli, subj))["stream_id"]
-        for i in range(4):
-            await _chunk(cli, subj, sid, i, b"x")
-        await _until(lambda: ended, 3)
-        await asyncio.sleep(0.1)
-        await _stop(host, svc, cli)
-        return got, ended
+        try:
+            await host.start(svc)
+            subj, _ = await _auth(host, cli)
+            sid = (await _open(cli, subj))["stream_id"]
+            for i in range(4):
+                await _chunk(cli, subj, sid, i, b"x")
+            await _until(lambda: ended, 3)
+            await asyncio.sleep(0.1)
+            return got, ended
+        finally:
+            await _stop(host, svc, cli)
 
     got, ended = asyncio.run(go())
     assert got[:2] == [(0, False), (1, False)]
@@ -366,11 +388,12 @@ def test_service_error_from_rpc_handler(broker_url):
             raise ServiceError("busy", "try later")
 
         svc, cli = await _cores(broker_url, 2)
-        await host.start(svc)
-        subj, _ = await _auth(host, cli)
-        rep = await cli.request_private(P.rpc_subject(subj, "work"), {})
-        await _stop(host, svc, cli)
-        return rep
+        try:
+            await host.start(svc)
+            subj, _ = await _auth(host, cli)
+            return await cli.request_private(P.rpc_subject(subj, "work"), {})
+        finally:
+            await _stop(host, svc, cli)
 
     rep = asyncio.run(go())
     assert rep == {
@@ -426,29 +449,31 @@ def test_emit_seq_is_per_session(broker_url):
             return {}
 
         svc, a, b = await _cores(broker_url, 3)
-        await host.start(svc)
-        subj_a, dr_a = await _auth(host, a)
-        subj_b, dr_b = await _auth(host, b)
-        await a.request_private(P.rpc_subject(subj_a, "who"), {"n": "a"})
-        await b.request_private(P.rpc_subject(subj_b, "who"), {"n": "b"})
-        got_a, got_b = [], []
+        try:
+            await host.start(svc)
+            subj_a, dr_a = await _auth(host, a)
+            subj_b, dr_b = await _auth(host, b)
+            await a.request_private(P.rpc_subject(subj_a, "who"), {"n": "a"})
+            await b.request_private(P.rpc_subject(subj_b, "who"), {"n": "b"})
+            got_a, got_b = [], []
 
-        async def rec_a(m):
-            got_a.append(json.loads(m.data)["seq"])
+            async def rec_a(m):
+                got_a.append(json.loads(m.data)["seq"])
 
-        async def rec_b(m):
-            got_b.append(json.loads(m.data)["seq"])
+            async def rec_b(m):
+                got_b.append(json.loads(m.data)["seq"])
 
-        await a.subscribe(f"{dr_a}.>", rec_a)
-        await b.subscribe(f"{dr_b}.>", rec_b)
-        await a.flush()
-        await b.flush()
-        await host.emit(sessions["a"], "utterance.listening", {})
-        await host.emit(sessions["b"], "utterance.listening", {})
-        await host.emit(sessions["a"], "utterance.transcript", {"text": "hi"})
-        await _until(lambda: len(got_a) == 2 and len(got_b) == 1, 3)
-        await _stop(host, svc, a, b)
-        return got_a, got_b
+            await a.subscribe(f"{dr_a}.>", rec_a)
+            await b.subscribe(f"{dr_b}.>", rec_b)
+            await a.flush()
+            await b.flush()
+            await host.emit(sessions["a"], "utterance.listening", {})
+            await host.emit(sessions["b"], "utterance.listening", {})
+            await host.emit(sessions["a"], "utterance.transcript", {"text": "hi"})
+            await _until(lambda: len(got_a) == 2 and len(got_b) == 1, 3)
+            return got_a, got_b
+        finally:
+            await _stop(host, svc, a, b)
 
     got_a, got_b = asyncio.run(go())
     assert got_a == [1, 2]  # no false gap from b's event
@@ -459,19 +484,21 @@ def test_publish_event_is_public_under_root(broker_url):
     async def go():
         host = _host()
         svc, spy = await _cores(broker_url, 2)
-        await host.start(svc)
-        got = []
+        try:
+            await host.start(svc)
+            got = []
 
-        async def rec(m):
-            got.append((m.subject, json.loads(m.data)))
+            async def rec(m):
+                got.append((m.subject, json.loads(m.data)))
 
-        await spy.subscribe(f"{host.root}.events.>", rec)
-        await spy.flush()
-        await host.publish_event("state", {"state": "ready"})
-        await host.publish_event("model.loaded", {"model": "small"})
-        await _until(lambda: len(got) == 2, 3)
-        await _stop(host, svc, spy)
-        return host, got
+            await spy.subscribe(f"{host.root}.events.>", rec)
+            await spy.flush()
+            await host.publish_event("state", {"state": "ready"})
+            await host.publish_event("model.loaded", {"model": "small"})
+            await _until(lambda: len(got) == 2, 3)
+            return host, got
+        finally:
+            await _stop(host, svc, spy)
 
     host, got = asyncio.run(go())
     assert got[0][0] == f"{host.root}.events.state"
@@ -483,21 +510,23 @@ def test_set_state_publishes_heartbeat_immediately(broker_url):
     async def go():
         host = _host(heartbeat_s=5.0)
         svc, cli = await _cores(broker_url, 2)
-        beats = []
+        try:
+            beats = []
 
-        async def rec(m):
-            beats.append(json.loads(m.data))
+            async def rec(m):
+                beats.append(json.loads(m.data))
 
-        await cli.subscribe(P.heartbeat(host.root), rec)
-        await cli.flush()
-        await host.start(svc)
-        await _until(lambda: beats, 3)
-        t0 = time.monotonic()
-        host.set_state("ready", {"model": "loading"})
-        await _until(lambda: len(beats) >= 2, 2)
-        dt = time.monotonic() - t0
-        await _stop(host, svc, cli)
-        return beats, dt
+            await cli.subscribe(P.heartbeat(host.root), rec)
+            await cli.flush()
+            await host.start(svc)
+            await _until(lambda: beats, 3)
+            t0 = time.monotonic()
+            host.set_state("ready", {"model": "loading"})
+            await _until(lambda: len(beats) >= 2, 2)
+            dt = time.monotonic() - t0
+            return beats, dt
+        finally:
+            await _stop(host, svc, cli)
 
     beats, dt = asyncio.run(go())
     assert dt < 1.0
@@ -512,15 +541,16 @@ def test_single_instance_probe_skipped_with_stdin_token(broker_url):
 
     async def go():
         first = _host(scope=scope, single_instance=True)
-        svc1, svc2 = await _cores(broker_url, 2)
-        await first.start(svc1)
-        await asyncio.sleep(0.25)  # first is beating
         local = _host(scope=scope, single_instance=True, stdin_token=new_token())
-        t0 = time.monotonic()
-        await local.start(svc2)  # no InstanceConflictError, no probe delay
-        dt = time.monotonic() - t0
-        await local.stop()
-        await _stop(first, svc1, svc2)
-        return dt
+        svc1, svc2 = await _cores(broker_url, 2)
+        try:
+            await first.start(svc1)
+            await asyncio.sleep(0.25)  # first is beating
+            t0 = time.monotonic()
+            await local.start(svc2)  # no InstanceConflictError, no probe delay
+            return time.monotonic() - t0
+        finally:
+            await local.stop()
+            await _stop(first, svc1, svc2)
 
     assert asyncio.run(go()) < 0.1

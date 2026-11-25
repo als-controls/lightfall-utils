@@ -112,18 +112,21 @@ def test_event_signal_and_streams(qtbot, started):
 
 def test_stop_shuts_down_child(qtbot, broker_url, tmp_path):
     client, created, log_path = _echo(broker_url, tmp_path)
-    client.start()
-    _wait_up(qtbot, client)
-    la = created[0]
-    proc = la._proc
-    assert proc is not None and proc.returncode is None
-    client.stop()
-    assert la.state == "stopped"
-    assert proc.returncode == 0
-    assert "shutdown requested by test" in log_path.read_text(errors="replace")
-    # Calls after stop fail fast.
-    with pytest.raises(RuntimeError):
-        client.call("echo", {}).result(timeout=1)
+    try:
+        client.start()
+        _wait_up(qtbot, client)
+        la = created[0]
+        proc = la._proc
+        assert proc is not None and proc.returncode is None
+        client.stop()
+        assert la.state == "stopped"
+        assert proc.returncode == 0
+        assert "shutdown requested by test" in log_path.read_text(errors="replace")
+        # Calls after stop fail fast.
+        with pytest.raises(RuntimeError):
+            client.call("echo", {}).result(timeout=1)
+    finally:
+        client.stop()
 
 
 def test_launcher_instance_uses_its_token(broker_url, tmp_path):

@@ -1,4 +1,5 @@
 import dataclasses
+import re
 
 import pytest
 
@@ -90,3 +91,19 @@ def test_wildcard_or_empty_tokens_in_prefix_rejected(prefix):
 def test_multi_token_prefix_accepted():
     d = _mk(scope="{prefix}.x", launch="external", command=())
     assert d.resolved_scope("als.7011", "h", "ab12") == "als.7011.x"
+
+
+@pytest.mark.parametrize(
+    ("scope", "needle"),
+    [
+        ("{unknown}.x", "unknown"),
+        ("{prefix}.{bogus}", "bogus"),
+        ("{}.x", "{}"),
+        ("{0}.x", "{0}"),
+        ("{prefix.x", "{"),
+        ("prefix}.x", "}"),
+    ],
+)
+def test_bad_scope_placeholders_raise_value_error(scope, needle):
+    with pytest.raises(ValueError, match=re.escape(needle)):
+        _mk(scope=scope, launch="external", command=())

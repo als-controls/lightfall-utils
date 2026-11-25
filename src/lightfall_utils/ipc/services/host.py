@@ -760,13 +760,13 @@ class ServiceHost:
             log.warning("stream %s… chunk kind %r != %r dropped", sid[:6], kind, st.kind)
             return
         final = headers.get(P.HDR_FINAL) == "1"
-        st.last_chunk = self._clock()
         if seq < st.next_seq:
             log.warning("stream %s… stale seq %d (< %d) dropped", sid[:6], seq, st.next_seq)
             return
         if seq > st.next_seq:
             log.warning("stream %s… gap: expected seq %d, got %d", sid[:6], st.next_seq, seq)
             self.summary["stream_gaps"] = self.summary.get("stream_gaps", 0) + 1
+        st.last_chunk = self._clock()
         st.next_seq = seq + 1
         assert st.queue is not None
         if final:

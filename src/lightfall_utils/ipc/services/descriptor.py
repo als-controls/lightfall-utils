@@ -53,11 +53,14 @@ class ServiceDescriptor:
         _check_scope(self._format("p", "h", "i"))
 
     def _format(self, prefix: str, hostname: str, client_instance: str) -> str:
-        return self.scope.format(
-            prefix=prefix,
-            hostname=sanitize_token(hostname),
-            client_instance=client_instance,
-        )
+        try:
+            return self.scope.format(
+                prefix=prefix,
+                hostname=sanitize_token(hostname),
+                client_instance=client_instance,
+            )
+        except (KeyError, IndexError, ValueError) as e:
+            raise ValueError(f"invalid scope template {self.scope!r}: {e}") from e
 
     def resolved_scope(self, prefix: str, hostname: str, client_instance: str) -> str:
         scope = self._format(prefix, hostname, client_instance)

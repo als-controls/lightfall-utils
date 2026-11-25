@@ -75,14 +75,16 @@ def test_call_roundtrip_via_private_request_only(broker_url):
         await host.start(svc)
         cli = await _core(broker_url, RecordingCore)
         client = _client(cli)
-        await client.start()
-        health = client.health
-        reply = await client.call("echo", {"x": 1})
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return health, reply, cli
+        try:
+            await client.start()
+            health = client.health
+            reply = await client.call("echo", {"x": 1})
+            return health, reply, cli
+        finally:
+            await client.close()
+            await host.stop()
+            await svc.close()
+            await cli.close()
 
     health, reply, cli = asyncio.run(go())
     assert health == "up"
@@ -102,14 +104,15 @@ def _incompatible(broker_url, host_contract, min_contract):
         await host.start(svc)
         cli = await _core(broker_url, RecordingCore)
         client = _client(cli, _desc(contract=min_contract))
-        await client.start()
-        reply = await client.call("echo", {})
-        result = (client.health, client.last_error, reply, list(cli.private), host.sessions)
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return result
+        try:
+            await client.start()
+            reply = await client.call("echo", {})
+            return (client.health, client.last_error, reply, list(cli.private), host.sessions)
+        finally:
+            await client.close()
+            await host.stop()
+            await svc.close()
+            await cli.close()
 
     return asyncio.run(go())
 
@@ -134,32 +137,33 @@ def test_incompatible_minor_below_min(broker_url):
 def test_bad_priv_root_unauthorized(broker_url):
     async def go():
         fake = await _core(broker_url)
-
-        async def on_info(msg):
-            info = {
-                "instance_id": "abc",
-                "name": "echo",
-                "state": "ready",
-                "version": "0",
-                "svc_protocol": P.SVC_PROTOCOL,
-                "contract": "1.0",
-                "priv_root": "_PRIV.short",
-                "single_instance": False,
-                "summary": {},
-                "ts": 0,
-            }
-            await fake.publish(msg.reply, json.dumps(info).encode())
-
-        await fake.subscribe(P.meta_info(P.root(SCOPE, "echo")), on_info)
-        await fake.flush()
         cli = await _core(broker_url, RecordingCore)
         client = _client(cli)
-        await client.start()
-        result = (client.health, client.last_error, list(cli.private))
-        await client.close()
-        await fake.close()
-        await cli.close()
-        return result
+        try:
+
+            async def on_info(msg):
+                info = {
+                    "instance_id": "abc",
+                    "name": "echo",
+                    "state": "ready",
+                    "version": "0",
+                    "svc_protocol": P.SVC_PROTOCOL,
+                    "contract": "1.0",
+                    "priv_root": "_PRIV.short",
+                    "single_instance": False,
+                    "summary": {},
+                    "ts": 0,
+                }
+                await fake.publish(msg.reply, json.dumps(info).encode())
+
+            await fake.subscribe(P.meta_info(P.root(SCOPE, "echo")), on_info)
+            await fake.flush()
+            await client.start()
+            return (client.health, client.last_error, list(cli.private))
+        finally:
+            await client.close()
+            await fake.close()
+            await cli.close()
 
     health, err, private = asyncio.run(go())
     assert health == "unauthorized"
@@ -174,13 +178,14 @@ def test_denied_handshake_unauthorized(broker_url):
         await host.start(svc)
         cli = await _core(broker_url)
         client = _client(cli)
-        await client.start()
-        result = (client.health, client.last_error)
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return result
+        try:
+            await client.start()
+            return (client.health, client.last_error)
+        finally:
+            await client.close()
+            await host.stop()
+            await svc.close()
+            await cli.close()
 
     health, err = asyncio.run(go())
     assert health == "unauthorized"
@@ -196,27 +201,29 @@ def test_health_recovers_after_gap(broker_url):
         await host.start(svc)
         cli = await _core(broker_url, RecordingCore)
         client = _client(cli, clock=clock)
-        states: list[str] = []
-        restarts: list[int] = []
-        client.on_state(states.append)
-        client.on_restarted(lambda: restarts.append(1))
-        await client.start()
-        auths = sum(s.endswith(".auth.request") for s in cli.private)
-        clock.t += 1.6 * P.HEARTBEAT_S
-        await client.tick()
-        degraded = client.health
-        clock.t += 2.0 * P.HEARTBEAT_S
-        await client.tick()
-        down = client.health
-        await svc.publish_json(P.heartbeat(host.root), host.info())
-        await _until(lambda: client.health == "up")
-        reply = await client.call("echo", {"ok": True})
-        auths_after = sum(s.endswith(".auth.request") for s in cli.private)
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return states, degraded, down, auths, auths_after, restarts, reply
+        try:
+            states: list[str] = []
+            restarts: list[int] = []
+            client.on_state(states.append)
+            client.on_restarted(lambda: restarts.append(1))
+            await client.start()
+            auths = sum(s.endswith(".auth.request") for s in cli.private)
+            clock.t += 1.6 * P.HEARTBEAT_S
+            await client.tick()
+            degraded = client.health
+            clock.t += 2.0 * P.HEARTBEAT_S
+            await client.tick()
+            down = client.health
+            await svc.publish_json(P.heartbeat(host.root), host.info())
+            await _until(lambda: client.health == "up")
+            reply = await client.call("echo", {"ok": True})
+            auths_after = sum(s.endswith(".auth.request") for s in cli.private)
+            return states, degraded, down, auths, auths_after, restarts, reply
+        finally:
+            await client.close()
+            await host.stop()
+            await svc.close()
+            await cli.close()
 
     states, degraded, down, auths, auths_after, restarts, reply = asyncio.run(go())
     assert degraded == "degraded"
@@ -230,28 +237,33 @@ def test_health_recovers_after_gap(broker_url):
 def test_restart_rehandshakes(broker_url):
     async def go():
         host1 = _echo_host()
+        host2 = _echo_host()
         svc1 = await _core(broker_url)
         await host1.start(svc1)
         cli = await _core(broker_url)
         client = _client(cli)
-        restarted = asyncio.Event()
-        client.on_restarted(restarted.set)
-        await client.start()
-        first = (client.info["instance_id"], client.info["priv_root"])
-        await host1.stop()
-        await svc1.close()
-        host2 = _echo_host()
-        svc2 = await _core(broker_url)
-        await host2.start(svc2)
-        await asyncio.wait_for(restarted.wait(), 5.0)
-        reply = await client.call("echo", {"n": 2})
-        second = (client.info["instance_id"], client.info["priv_root"])
-        result = (first, second, reply, client.health, host2.instance_id, svc2.priv_root)
-        await client.close()
-        await host2.stop()
-        await svc2.close()
-        await cli.close()
-        return result
+        svc2 = None
+        try:
+            restarted = asyncio.Event()
+            client.on_restarted(restarted.set)
+            await client.start()
+            first = (client.info["instance_id"], client.info["priv_root"])
+            await host1.stop()
+            await svc1.close()
+            svc2 = await _core(broker_url)
+            await host2.start(svc2)
+            await asyncio.wait_for(restarted.wait(), 5.0)
+            reply = await client.call("echo", {"n": 2})
+            second = (client.info["instance_id"], client.info["priv_root"])
+            return (first, second, reply, client.health, host2.instance_id, svc2.priv_root)
+        finally:
+            await client.close()
+            await host1.stop()
+            await host2.stop()
+            await svc1.close()
+            if svc2 is not None:
+                await svc2.close()
+            await cli.close()
 
     first, second, reply, health, iid2, pr2 = asyncio.run(go())
     assert first != second
@@ -267,18 +279,20 @@ def test_delivery_event_received(broker_url):
         await host.start(svc)
         cli = await _core(broker_url)
         client = _client(cli)
-        got: asyncio.Future = asyncio.get_running_loop().create_future()
-        client.on_event("stream_total", lambda ev: got.done() or got.set_result(ev))
-        await client.start()
-        sid = await client.open_stream("bytes", {})
-        await client.send_chunk(sid, 0, b"abc")
-        await client.send_chunk(sid, 1, b"defg", final=True)
-        ev = await asyncio.wait_for(got, 3.0)
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return sid, ev, host.instance_id
+        try:
+            got: asyncio.Future = asyncio.get_running_loop().create_future()
+            client.on_event("stream_total", lambda ev: got.done() or got.set_result(ev))
+            await client.start()
+            sid = await client.open_stream("bytes", {})
+            await client.send_chunk(sid, 0, b"abc")
+            await client.send_chunk(sid, 1, b"defg", final=True)
+            ev = await asyncio.wait_for(got, 3.0)
+            return sid, ev, host.instance_id
+        finally:
+            await client.close()
+            await host.stop()
+            await svc.close()
+            await cli.close()
 
     sid, ev, iid = asyncio.run(go())
     assert ev["stream_id"] == sid
@@ -295,18 +309,19 @@ def test_close_stream_emits_total(broker_url):
         await host.start(svc)
         cli = await _core(broker_url)
         client = _client(cli)
-        got: asyncio.Future = asyncio.get_running_loop().create_future()
-        client.on_event("stream_total", lambda ev: got.done() or got.set_result(ev))
-        await client.start()
-        sid = await client.open_stream("bytes", {})
-        await client.send_chunk(sid, 0, b"12345")
-        await client.close_stream(sid)
-        ev = await asyncio.wait_for(got, 3.0)
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return ev
+        try:
+            got: asyncio.Future = asyncio.get_running_loop().create_future()
+            client.on_event("stream_total", lambda ev: got.done() or got.set_result(ev))
+            await client.start()
+            sid = await client.open_stream("bytes", {})
+            await client.send_chunk(sid, 0, b"12345")
+            await client.close_stream(sid)
+            return await asyncio.wait_for(got, 3.0)
+        finally:
+            await client.close()
+            await host.stop()
+            await svc.close()
+            await cli.close()
 
     ev = asyncio.run(go())
     assert ev["bytes"] == 5
@@ -329,18 +344,20 @@ def test_service_stream_chunks_reach_on_stream(broker_url):
         await host.start(svc)
         cli = await _core(broker_url)
         client = _client(cli, _desc(name="pusher"))
-        chunks: list = []
-        events: list = []
-        client.on_stream(lambda sid, seq, data, final: chunks.append((sid, seq, data, final)))
-        client.on_event("done", events.append)
-        await client.start()
-        await client.call("push", {})
-        await _until(lambda: events)
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return chunks, events
+        try:
+            chunks: list = []
+            events: list = []
+            client.on_stream(lambda sid, seq, data, final: chunks.append((sid, seq, data, final)))
+            client.on_event("done", events.append)
+            await client.start()
+            await client.call("push", {})
+            await _until(lambda: events)
+            return chunks, events
+        finally:
+            await client.close()
+            await host.stop()
+            await svc.close()
+            await cli.close()
 
     chunks, events = asyncio.run(go())
     assert chunks == [("s1", 0, b"aa", False), ("s1", 1, b"bb", True)]
@@ -355,20 +372,22 @@ def test_ping_keeps_session_alive(broker_url):
         await host.start(svc)
         cli = await _core(broker_url, RecordingCore)
         client = _client(cli, clock=clock)
-        await client.start()
-        for _ in range(12):
-            clock.t += P.PING_S
-            await client.tick()
-            await asyncio.sleep(0.15)  # let a real heartbeat and the host sweep run
-        sessions = host.sessions
-        reply = await client.call("echo", {"alive": True})
-        pings = sum(s.endswith(".rpc.session.ping") for s in cli.private)
-        auths = sum(s.endswith(".auth.request") for s in cli.private)
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return sessions, reply, pings, auths
+        try:
+            await client.start()
+            for _ in range(12):
+                clock.t += P.PING_S
+                await client.tick()
+                await asyncio.sleep(0.15)  # let a real heartbeat and the host sweep run
+            sessions = host.sessions
+            reply = await client.call("echo", {"alive": True})
+            pings = sum(s.endswith(".rpc.session.ping") for s in cli.private)
+            auths = sum(s.endswith(".auth.request") for s in cli.private)
+            return sessions, reply, pings, auths
+        finally:
+            await client.close()
+            await host.stop()
+            await svc.close()
+            await cli.close()
 
     sessions, reply, pings, auths = asyncio.run(go())
     assert len(sessions) == 1
@@ -384,13 +403,14 @@ def test_timeout_maps_to_error_dict(broker_url):
         await host.start(svc)
         cli = await _core(broker_url)
         client = _client(cli)
-        await client.start()
-        reply = await client.call("slow", {"seconds": 1.0}, timeout=0.1)
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return reply
+        try:
+            await client.start()
+            return await client.call("slow", {"seconds": 1.0}, timeout=0.1)
+        finally:
+            await client.close()
+            await host.stop()
+            await svc.close()
+            await cli.close()
 
     reply = asyncio.run(go())
     assert reply["status"] == "error"
@@ -404,21 +424,18 @@ def test_no_responders_sets_down(broker_url):
         await host.start(svc)
         cli = await _core(broker_url)
         client = _client(cli)
-        await client.start()
-        # Simulate the service vanishing without a final heartbeat.
-        for t in host._tasks:
-            t.cancel()
-        for sub in host._subs:
-            await sub.unsubscribe()
-        host._subs.clear()
-        await svc.flush()
-        reply = await client.call("echo", {})
-        health = client.health
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return reply, health
+        try:
+            await client.start()
+            # Simulate the service vanishing without a final heartbeat.
+            await svc.close()
+            await host.stop()
+            reply = await client.call("echo", {})
+            return reply, client.health
+        finally:
+            await client.close()
+            await host.stop()
+            await svc.close()
+            await cli.close()
 
     reply, health = asyncio.run(go())
     assert reply["status"] == "error"
@@ -429,20 +446,24 @@ def test_start_with_no_service_is_down_then_connects(broker_url):
     async def go():
         cli = await _core(broker_url)
         client = _client(cli)
-        restarts: list[int] = []
-        client.on_restarted(lambda: restarts.append(1))
-        await client.start()
-        before = client.health
         host = _echo_host()
-        svc = await _core(broker_url)
-        await host.start(svc)
-        await _until(lambda: client.health == "up")
-        reply = await client.call("echo", {})
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return before, reply, restarts
+        svc = None
+        try:
+            restarts: list[int] = []
+            client.on_restarted(lambda: restarts.append(1))
+            await client.start()
+            before = client.health
+            svc = await _core(broker_url)
+            await host.start(svc)
+            await _until(lambda: client.health == "up")
+            reply = await client.call("echo", {})
+            return before, reply, restarts
+        finally:
+            await client.close()
+            await host.stop()
+            if svc is not None:
+                await svc.close()
+            await cli.close()
 
     before, reply, restarts = asyncio.run(go())
     assert before == "down"
@@ -478,18 +499,19 @@ def test_handshake_failure_on_current_instance_is_retried(broker_url):
         await host.start(svc)
         cli = await _core(broker_url)
         client = _client(cli)
-        restarts: list[int] = []
-        client.on_restarted(lambda: restarts.append(1))
-        await client.start()
-        first = client.health
-        await _until(lambda: client.health == "up", timeout=8.0)
-        reply = await client.call("echo", {"retry": True})
-        result = (first, reply, calls["n"], client.session_subject, restarts)
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return result
+        try:
+            restarts: list[int] = []
+            client.on_restarted(lambda: restarts.append(1))
+            await client.start()
+            first = client.health
+            await _until(lambda: client.health == "up", timeout=8.0)
+            reply = await client.call("echo", {"retry": True})
+            return (first, reply, calls["n"], client.session_subject, restarts)
+        finally:
+            await client.close()
+            await host.stop()
+            await svc.close()
+            await cli.close()
 
     first, reply, n, subj, restarts = asyncio.run(go())
     assert first == "down"
@@ -515,20 +537,24 @@ def test_start_does_not_double_handshake(broker_url):
 
         host._on_info = slow_info
         svc = await _core(broker_url)
-        await host.start(svc)
-        results = []
-        for _ in range(5):
-            cli = await _core(broker_url, RecordingCore)
-            client = _client(cli)
-            await client.start()
-            await asyncio.sleep(0.3)  # time for any spurious reconnect to run
-            auths = sum(s.endswith(".auth.request") for s in cli.private)
-            results.append((auths, len(host.sessions), client.health))
-            await client.close()
-            await cli.close()
-        await host.stop()
-        await svc.close()
-        return results
+        try:
+            await host.start(svc)
+            results = []
+            for _ in range(5):
+                cli = await _core(broker_url, RecordingCore)
+                client = _client(cli)
+                try:
+                    await client.start()
+                    await asyncio.sleep(0.3)  # time for any spurious reconnect to run
+                    auths = sum(s.endswith(".auth.request") for s in cli.private)
+                    results.append((auths, len(host.sessions), client.health))
+                finally:
+                    await client.close()
+                    await cli.close()
+            return results
+        finally:
+            await host.stop()
+            await svc.close()
 
     for auths, sessions, health in asyncio.run(go()):
         assert auths == 1

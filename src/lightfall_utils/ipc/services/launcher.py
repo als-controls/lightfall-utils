@@ -23,6 +23,7 @@ from typing import Literal
 State = Literal["running", "backoff", "gave_up", "stopped"]
 _TAIL = 20
 _LINE_LIMIT = 1 << 20
+_DRAIN_S = 0.5
 log = logging.getLogger(__name__)
 
 
@@ -228,6 +229,9 @@ class LocalLauncher:
                 except TimeoutError:
                     await self._kill(proc)
         if task is not None:
+            if not task.done() and self.state != "backoff":
+                with contextlib.suppress(TimeoutError, Exception):
+                    await asyncio.wait_for(asyncio.shield(task), _DRAIN_S)
             if not task.done():
                 # child is dead or the supervisor is sleeping in backoff: stop it now
                 task.cancel()

@@ -11,6 +11,7 @@ from typing import Any
 
 import nats
 from nats.aio.msg import Msg
+from nats.aio.subscription import Subscription
 
 from lightfall_utils.ipc.capability import (
     ConnectionCapability,
@@ -122,7 +123,7 @@ class NatsCore:
             await push(force_flush=True)
         await nc.flush(timeout=timeout)
 
-    async def subscribe(self, subject: str, cb: Callable[[Msg], Awaitable[None]]):
+    async def subscribe(self, subject: str, cb: Callable[[Msg], Awaitable[None]]) -> Subscription:
         return await self._conn().subscribe(subject, cb=cb)
 
     async def publish(

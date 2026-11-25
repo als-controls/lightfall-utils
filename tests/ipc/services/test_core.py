@@ -1,11 +1,17 @@
 import asyncio
 import json
 import ssl
+import typing
 
 import nats
 import pytest
+from nats.aio.subscription import Subscription
 
 from lightfall_utils.ipc.services.core import NatsCore
+
+
+def test_subscribe_return_annotation():
+    assert typing.get_type_hints(NatsCore.subscribe)["return"] is Subscription
 
 
 def test_publish_bytes_with_headers_roundtrip(broker_url):
@@ -13,18 +19,19 @@ def test_publish_bytes_with_headers_roundtrip(broker_url):
         a, b = NatsCore(broker_url), NatsCore(broker_url)
         await a.connect()
         await b.connect()
-        got = asyncio.get_running_loop().create_future()
+        try:
+            got = asyncio.get_running_loop().create_future()
 
-        async def cb(msg):
-            got.set_result((msg.data, dict(msg.headers or {})))
+            async def cb(msg):
+                got.set_result((msg.data, dict(msg.headers or {})))
 
-        await b.subscribe("t.hdr", cb)
-        await b.flush()
-        await a.publish("t.hdr", b"\x00\x01bin", headers={"Svc-Seq": "3", "Svc-Final": "1"})
-        out = await asyncio.wait_for(got, 3)
-        await a.close()
-        await b.close()
-        return out
+            await b.subscribe("t.hdr", cb)
+            await b.flush()
+            await a.publish("t.hdr", b"\x00\x01bin", headers={"Svc-Seq": "3", "Svc-Final": "1"})
+            return await asyncio.wait_for(got, 3)
+        finally:
+            await a.close()
+            await b.close()
 
     data, hdrs = asyncio.run(go())
     assert data == b"\x00\x01bin"
@@ -35,16 +42,17 @@ def test_publish_json(broker_url):
     async def go():
         a = NatsCore(broker_url)
         await a.connect()
-        got = asyncio.get_running_loop().create_future()
+        try:
+            got = asyncio.get_running_loop().create_future()
 
-        async def cb(msg):
-            got.set_result(json.loads(msg.data))
+            async def cb(msg):
+                got.set_result(json.loads(msg.data))
 
-        await a.subscribe("t.json", cb)
-        await a.publish_json("t.json", {"x": 1})
-        out = await asyncio.wait_for(got, 3)
-        await a.close()
-        return out
+            await a.subscribe("t.json", cb)
+            await a.publish_json("t.json", {"x": 1})
+            return await asyncio.wait_for(got, 3)
+        finally:
+            await a.close()
 
     assert asyncio.run(go()) == {"x": 1}
 
@@ -63,16 +71,17 @@ def test_request_public_roundtrip(broker_url):
         a, b = NatsCore(broker_url), NatsCore(broker_url)
         await a.connect()
         await b.connect()
+        try:
 
-        async def cb(msg):
-            await b.publish(msg.reply, json.dumps({"ok": True}).encode())
+            async def cb(msg):
+                await b.publish(msg.reply, json.dumps({"ok": True}).encode())
 
-        await b.subscribe("t.pub", cb)
-        await b.flush()
-        out = await a.request_public("t.pub", {"q": 1})
-        await a.close()
-        await b.close()
-        return out
+            await b.subscribe("t.pub", cb)
+            await b.flush()
+            return await a.request_public("t.pub", {"q": 1})
+        finally:
+            await a.close()
+            await b.close()
 
     assert asyncio.run(go()) == {"ok": True}
 
@@ -82,18 +91,19 @@ def test_request_private_roundtrip(broker_url):
         a, b = NatsCore(broker_url), NatsCore(broker_url)
         await a.connect()
         await b.connect()
-        subject = f"{b.priv_root}.x"
+        try:
+            subject = f"{b.priv_root}.x"
 
-        async def cb(msg):
-            req = json.loads(msg.data)
-            await b.publish(msg.reply, json.dumps({"echo": req["v"]}).encode())
+            async def cb(msg):
+                req = json.loads(msg.data)
+                await b.publish(msg.reply, json.dumps({"echo": req["v"]}).encode())
 
-        await b.subscribe(subject, cb)
-        await b.flush()
-        out = await a.request_private(subject, {"v": 7})
-        await a.close()
-        await b.close()
-        return out
+            await b.subscribe(subject, cb)
+            await b.flush()
+            return await a.request_private(subject, {"v": 7})
+        finally:
+            await a.close()
+            await b.close()
 
     assert asyncio.run(go()) == {"echo": 7}
 
@@ -284,27 +294,29 @@ def test_reconnects_after_broker_restart_on_same_port():
             on_reconnected=lambda: events.append("up"),
         )
         await core.connect()
-        got = asyncio.Queue()
+        try:
+            got = asyncio.Queue()
 
-        async def cb(msg):
-            await got.put(msg.data)
+            async def cb(msg):
+                await got.put(msg.data)
 
-        await core.subscribe("lfcore.restart", cb)
-        await core.flush()
-        server.stop()
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + 10
-        while "down" not in events and loop.time() < deadline:
-            await asyncio.sleep(0.05)
-        server = LocalNatsServer(port=port, host="127.0.0.1")
-        await asyncio.to_thread(server.start, 10.0)
-        while "up" not in events and loop.time() < deadline + 10:
-            await asyncio.sleep(0.05)
-        connected = core.is_connected
-        await core.publish("lfcore.restart", b"again")  # the subscription was restored
-        data = await asyncio.wait_for(got.get(), 5)
-        await core.close()
-        return connected, data
+            await core.subscribe("lfcore.restart", cb)
+            await core.flush()
+            server.stop()
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 10
+            while "down" not in events and loop.time() < deadline:
+                await asyncio.sleep(0.05)
+            server = LocalNatsServer(port=port, host="127.0.0.1")
+            await asyncio.to_thread(server.start, 10.0)
+            while "up" not in events and loop.time() < deadline + 10:
+                await asyncio.sleep(0.05)
+            connected = core.is_connected
+            await core.publish("lfcore.restart", b"again")  # the subscription was restored
+            data = await asyncio.wait_for(got.get(), 5)
+            return connected, data
+        finally:
+            await core.close()
 
     try:
         connected, data = asyncio.run(go())

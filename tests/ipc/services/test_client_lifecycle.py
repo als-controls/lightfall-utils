@@ -88,39 +88,45 @@ def test_single_ping_timeout_is_tolerated_then_reset_fires(broker_url):
     async def go():
         clock = FakeClock()
         host = _host()
-        svc = await _core(broker_url)
-        await host.start(svc)
-        cli = await _core(broker_url, FlakyCore)
-        client = _client(cli, clock=clock)
-        resets: list[list[str]] = []
-        restarts: list[int] = []
-        states: list[str] = []
-        client.on_session_reset(resets.append)
-        client.on_restarted(lambda: restarts.append(1))
-        client.on_state(states.append)
-        await client.start()
-        sid = await client.open_stream("bytes")
-        subj0 = client.session_subject
+        svc = cli = client = None
+        try:
+            svc = await _core(broker_url)
+            await host.start(svc)
+            cli = await _core(broker_url, FlakyCore)
+            client = _client(cli, clock=clock)
+            resets: list[list[str]] = []
+            restarts: list[int] = []
+            states: list[str] = []
+            client.on_session_reset(resets.append)
+            client.on_restarted(lambda: restarts.append(1))
+            client.on_state(states.append)
+            await client.start()
+            sid = await client.open_stream("bytes")
+            subj0 = client.session_subject
 
-        cli.fail_pings = 1
-        await _ping_round(client, clock)
-        after_one = (client.session_subject == subj0, _auths(cli), list(resets))
-        await _ping_round(client, clock)  # an OK ping resets the failure count
-
-        cli.fail_pings = 3
-        for _ in range(3):
+            cli.fail_pings = 1
             await _ping_round(client, clock)
-        await _until(lambda: resets, 5)
-        subj1 = client.session_subject
-        with pytest.raises(StreamClosedError):
-            await client.send_chunk(sid, 0, b"x")
-        reply = await client.call("echo", {"after": "reset"})
-        result = (after_one, subj0, subj1, resets, restarts, states, reply, _auths(cli))
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return sid, result
+            after_one = (client.session_subject == subj0, _auths(cli), list(resets))
+            await _ping_round(client, clock)  # an OK ping resets the failure count
+
+            cli.fail_pings = 3
+            for _ in range(3):
+                await _ping_round(client, clock)
+            await _until(lambda: resets, 5)
+            subj1 = client.session_subject
+            with pytest.raises(StreamClosedError):
+                await client.send_chunk(sid, 0, b"x")
+            reply = await client.call("echo", {"after": "reset"})
+            result = (after_one, subj0, subj1, resets, restarts, states, reply, _auths(cli))
+            return sid, result
+        finally:
+            if client is not None:
+                await client.close()
+            await host.stop()
+            if svc is not None:
+                await svc.close()
+            if cli is not None:
+                await cli.close()
 
     sid, (after_one, subj0, subj1, resets, restarts, states, reply, auths) = asyncio.run(go())
     assert after_one == (True, 1, [])  # one slow ping: same session, no handshake, no reset
@@ -136,23 +142,28 @@ def test_pause_longer_than_lease_rehandshakes_instead_of_up(broker_url):
     async def go():
         clock = FakeClock()
         host = _host()
-        svc = await _core(broker_url)
-        await host.start(svc)
-        cli = await _core(broker_url, FlakyCore)
-        client = _client(cli, clock=clock)
-        resets: list[list[str]] = []
-        client.on_session_reset(resets.append)
-        await client.start()
-        subj0 = client.session_subject
-        clock.t += P.LEASE_S + 5  # e.g. the laptop slept; the service expired the lease
-        await _until(lambda: resets, 5)
-        await _until(lambda: client.health == "up", 5)
-        result = (subj0, client.session_subject, resets, _auths(cli))
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return result
+        svc = cli = client = None
+        try:
+            svc = await _core(broker_url)
+            await host.start(svc)
+            cli = await _core(broker_url, FlakyCore)
+            client = _client(cli, clock=clock)
+            resets: list[list[str]] = []
+            client.on_session_reset(resets.append)
+            await client.start()
+            subj0 = client.session_subject
+            clock.t += P.LEASE_S + 5  # e.g. the laptop slept; the service expired the lease
+            await _until(lambda: resets, 5)
+            await _until(lambda: client.health == "up", 5)
+            return (subj0, client.session_subject, resets, _auths(cli))
+        finally:
+            if client is not None:
+                await client.close()
+            await host.stop()
+            if svc is not None:
+                await svc.close()
+            if cli is not None:
+                await cli.close()
 
     subj0, subj1, resets, auths = asyncio.run(go())
     assert subj1 is not None and subj1 != subj0
@@ -164,20 +175,24 @@ def test_expect_launch_reports_starting_until_instance_seen(broker_url):
     async def go():
         cli = await _core(broker_url)
         client = _client(cli)
-        states: list[str] = []
-        client.on_state(states.append)
-        client.expect_launch()
-        await client.start()
-        before = (client.health, client.last_error)
         host = _host()
-        svc = await _core(broker_url)
-        await host.start(svc)
-        await _until(lambda: client.health == "up")
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return before, states
+        svc = None
+        try:
+            states: list[str] = []
+            client.on_state(states.append)
+            client.expect_launch()
+            await client.start()
+            before = (client.health, client.last_error)
+            svc = await _core(broker_url)
+            await host.start(svc)
+            await _until(lambda: client.health == "up")
+            return before, states
+        finally:
+            await client.close()
+            await host.stop()
+            if svc is not None:
+                await svc.close()
+            await cli.close()
 
     before, states = asyncio.run(go())
     assert before == ("starting", "meta.info: NoRespondersError")
@@ -189,17 +204,21 @@ def test_new_instance_beat_not_gated_by_retry_backoff(broker_url):
         clock = FakeClock()  # frozen: a backoff gate would never open
         cli = await _core(broker_url)
         client = _client(cli, clock=clock)
-        await client.start()
-        gated = client._retry_at > clock.t
         host = _host()
-        svc = await _core(broker_url)
-        await host.start(svc)
-        await _until(lambda: client.health == "up", 3)
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return gated
+        svc = None
+        try:
+            await client.start()
+            gated = client._retry_at > clock.t
+            svc = await _core(broker_url)
+            await host.start(svc)
+            await _until(lambda: client.health == "up", 3)
+            return gated
+        finally:
+            await client.close()
+            await host.stop()
+            if svc is not None:
+                await svc.close()
+            await cli.close()
 
     assert asyncio.run(go())
 
@@ -211,21 +230,23 @@ def test_on_info_fires_on_state_or_summary_change(broker_url):
         await host.start(svc)
         cli = await _core(broker_url)
         client = _client(cli)
-        infos: list[tuple] = []
-        client.on_info(lambda i: infos.append((i.get("state"), i.get("summary"))))
-        await client.start()
-        await asyncio.sleep(0.35)  # identical beats: no extra callbacks
-        n_idle = len(infos)
-        host.set_state("starting", {"model": "loading"})
-        await _until(lambda: infos[-1] == ("starting", {"model": "loading"}))
-        host.set_state("ready", {"model": "ready", "device": "cpu"})
-        await _until(lambda: infos[-1][0] == "ready")
-        info = dict(client.info)
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return n_idle, infos, info
+        try:
+            infos: list[tuple] = []
+            client.on_info(lambda i: infos.append((i.get("state"), i.get("summary"))))
+            await client.start()
+            await asyncio.sleep(0.35)  # identical beats: no extra callbacks
+            n_idle = len(infos)
+            host.set_state("starting", {"model": "loading"})
+            await _until(lambda: infos[-1] == ("starting", {"model": "loading"}))
+            host.set_state("ready", {"model": "ready", "device": "cpu"})
+            await _until(lambda: infos[-1][0] == "ready")
+            info = dict(client.info)
+            return n_idle, infos, info
+        finally:
+            await client.close()
+            await host.stop()
+            await svc.close()
+            await cli.close()
 
     n_idle, infos, info = asyncio.run(go())
     assert n_idle == 1  # the meta.info fetch
@@ -241,20 +262,22 @@ def test_public_event_reaches_client(broker_url):
         await host.start(svc)
         cli = await _core(broker_url)
         client = _client(cli)
-        got: list[dict] = []
-        other: list[dict] = []
-        client.on_public_event("state", got.append)
-        client.on_public_event("model.loaded", other.append)
-        await client.start()
-        await host.publish_event("state", {"state": "ready"})
-        await host.publish_event("model.loaded", {"model": "small"})
-        await host.publish_event("unwatched", {})
-        await _until(lambda: got and other)
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return host, got, other
+        try:
+            got: list[dict] = []
+            other: list[dict] = []
+            client.on_public_event("state", got.append)
+            client.on_public_event("model.loaded", other.append)
+            await client.start()
+            await host.publish_event("state", {"state": "ready"})
+            await host.publish_event("model.loaded", {"model": "small"})
+            await host.publish_event("unwatched", {})
+            await _until(lambda: got and other)
+            return host, got, other
+        finally:
+            await client.close()
+            await host.stop()
+            await svc.close()
+            await cli.close()
 
     host, got, other = asyncio.run(go())
     assert got == [{"state": "ready", "instance_id": host.instance_id, "seq": 1}]
@@ -284,29 +307,31 @@ def test_adopt_stream_for_rpc_opened_stream(broker_url):
         await host.start(svc)
         cli = await _core(broker_url)
         client = _client(cli)
-        await client.start()
+        try:
+            await client.start()
 
-        async def spy(msg):
-            spy_headers.append(dict(msg.headers or {}))
+            async def spy(msg):
+                spy_headers.append(dict(msg.headers or {}))
 
-        await svc.subscribe(f"{client.session_subject}.stream.>", spy)
-        await svc.flush()
-        rep = await client.call("utterance.start", {"rate": 16000})
-        busy = await client.call("utterance.start", {})
-        sid = rep["stream_id"]
-        with pytest.raises(StreamClosedError):
-            await client.send_chunk(sid, 0, b"a")  # not adopted yet
-        client.adopt_stream(sid)
-        await client.send_chunk(sid, 0, b"a")
-        await client.send_chunk(sid, 1, b"b", final=True)
-        await _until(lambda: ended)
-        with pytest.raises(StreamClosedError):
-            await client.send_chunk(sid, 2, b"c")  # finished
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return busy, chunks, ended, spy_headers
+            await svc.subscribe(f"{client.session_subject}.stream.>", spy)
+            await svc.flush()
+            rep = await client.call("utterance.start", {"rate": 16000})
+            busy = await client.call("utterance.start", {})
+            sid = rep["stream_id"]
+            with pytest.raises(StreamClosedError):
+                await client.send_chunk(sid, 0, b"a")  # not adopted yet
+            client.adopt_stream(sid)
+            await client.send_chunk(sid, 0, b"a")
+            await client.send_chunk(sid, 1, b"b", final=True)
+            await _until(lambda: ended)
+            with pytest.raises(StreamClosedError):
+                await client.send_chunk(sid, 2, b"c")  # finished
+            return busy, chunks, ended, spy_headers
+        finally:
+            await client.close()
+            await host.stop()
+            await svc.close()
+            await cli.close()
 
     busy, chunks, ended, spy_headers = asyncio.run(go())
     assert busy["code"] == "busy"
@@ -322,15 +347,17 @@ def test_call_maps_nats_errors_to_error_dict(broker_url):
         await host.start(svc)
         cli = await _core(broker_url, FlakyCore)
         client = _client(cli)
-        await client.start()
-        cli.raise_exc = ConnectionClosedError()
-        closed = await client.call("echo", {})
-        cli.raise_exc = None
-        await client.close()
-        await host.stop()
-        await svc.close()
-        await cli.close()
-        return closed
+        try:
+            await client.start()
+            cli.raise_exc = ConnectionClosedError()
+            closed = await client.call("echo", {})
+            cli.raise_exc = None
+            return closed
+        finally:
+            await client.close()
+            await host.stop()
+            await svc.close()
+            await cli.close()
 
     closed = asyncio.run(go())
     assert closed["status"] == "error" and closed["code"] == "unknown"
@@ -341,40 +368,44 @@ def test_rehandshake_that_finds_new_instance_fires_restarted(broker_url):
     async def go():
         clock = FakeClock()
         host1 = _host(heartbeat_s=1000.0)  # one beat at start, then silent
-        svc1 = await _core(broker_url)
-        await host1.start(svc1)
-        cli = await _core(broker_url, FlakyCore)
-        client = _client(cli, clock=clock)
-        resets, restarts = [], []
-        client.on_session_reset(resets.append)
-        client.on_restarted(lambda: restarts.append(1))
-        await client.start()
-        # The process vanishes (no final beat) and is replaced; the new one's only beat is
-        # missed, and pings time out.
-        for t in host1._tasks:
-            t.cancel()
-        for sub in host1._subs:
-            await sub.unsubscribe()
-        host1._subs.clear()
-        await svc1.close()
         host2 = _host(heartbeat_s=1000.0)
-        client._retired.add(host2.instance_id)  # the client misses host2's only beat
-        svc2 = await _core(broker_url)
-        await host2.start(svc2)
-        await asyncio.sleep(0.2)
-        client._retired.discard(host2.instance_id)
-        cli.fail_pings = 3
-        for _ in range(3):
-            clock.t += P.PING_S
-            client._last_beat = clock.t  # keep health "up" so pings are sent
-            await client.tick()
-        await _until(lambda: restarts or resets, 5)
-        result = (resets, restarts, client.info["instance_id"] == host2.instance_id)
-        await client.close()
-        await host2.stop()
-        await svc2.close()
-        await cli.close()
-        return result
+        svc1 = svc2 = cli = client = None
+        try:
+            svc1 = await _core(broker_url)
+            await host1.start(svc1)
+            cli = await _core(broker_url, FlakyCore)
+            client = _client(cli, clock=clock)
+            resets, restarts = [], []
+            client.on_session_reset(resets.append)
+            client.on_restarted(lambda: restarts.append(1))
+            await client.start()
+            # The process vanishes (no final beat) and is replaced; the new one's only beat is
+            # missed, and pings time out.
+            await svc1.close()
+            await host1.stop()
+            client._retired.add(host2.instance_id)  # the client misses host2's only beat
+            svc2 = await _core(broker_url)
+            await host2.start(svc2)
+            await asyncio.sleep(0.2)
+            client._retired.discard(host2.instance_id)
+            cli.fail_pings = 3
+            for _ in range(3):
+                clock.t += P.PING_S
+                client._last_beat = clock.t  # keep health "up" so pings are sent
+                await client.tick()
+            await _until(lambda: restarts or resets, 5)
+            return (resets, restarts, client.info["instance_id"] == host2.instance_id)
+        finally:
+            if client is not None:
+                await client.close()
+            await host1.stop()
+            await host2.stop()
+            if svc1 is not None:
+                await svc1.close()
+            if svc2 is not None:
+                await svc2.close()
+            if cli is not None:
+                await cli.close()
 
     resets, restarts, new_iid = asyncio.run(go())
     assert restarts == [1] and resets == []

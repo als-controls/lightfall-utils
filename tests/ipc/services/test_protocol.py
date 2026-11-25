@@ -1,6 +1,14 @@
+import inspect
+
 import pytest
 
 from lightfall_utils.ipc.services import protocol as p
+
+
+def test_params_do_not_shadow_functions():
+    funcs = {k: v for k, v in vars(p).items() if callable(v) and not k.startswith("_")}
+    for name, fn in funcs.items():
+        assert not (set(inspect.signature(fn).parameters) & funcs.keys()), name
 
 
 def test_constants():
@@ -57,6 +65,31 @@ def test_contract_ok():
     assert not p.contract_ok("2.0", "1.0")
     assert p.contract_ok("1.0", "1.0")
     assert not p.contract_ok("junk", "1.0")
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "junk",
+        "",
+        "1",
+        "1.2.3",
+        "-1.0",
+        "1.-2",
+        "+1.0",
+        "1.+0",
+        " 1.0",
+        "1.0 ",
+        "1. 0",
+        "1_0.0",
+        "١.0",
+    ],
+)
+def test_parse_contract_rejects_odd_forms(bad):
+    with pytest.raises(ValueError):
+        p._parse_contract(bad)
+    assert not p.contract_ok(bad, "1.0")
+    assert not p.contract_ok("1.0", bad)
 
 
 def test_replies():
